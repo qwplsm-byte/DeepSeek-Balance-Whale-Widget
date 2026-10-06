@@ -15,7 +15,13 @@ const { URL } = require('url')
 const ROOT = __dirname
 const ASSETS = path.join(ROOT, 'assets')
 const PUBLIC = path.join(ROOT, 'public')
+const PRESETS = path.join(ROOT, 'presets')   // 角色清单 / 台词队列的唯一来源
 const CONFIG_FILE = path.join(ROOT, 'config.json')
+const BACKUP_VERSION = 1
+
+// 允许写入 / 导出 / 导入的配置键（白名单）。config.json 是用户本机文件，
+// 不接受任意字段进来；新增字段时必须同时登记在这里，否则导出/导入会漏掉它。
+const CONFIG_KEYS = ['demo', 'dsKey', 'dsMode', 'role', 'autostart', 'widget', 'bubbleGpt', 'bubbleWhale']
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -29,12 +35,41 @@ const MIME = {
 }
 
 function readConfig() {
-  try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) } catch (err) { return {} }
+  try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) } catch (err) {
+    if (err && err.code !== 'ENOENT') console.warn('[dsh-pet] config.json 读取失败（按空配置继续）：' + err.message)
+    return {}
+  }
 }
+
+// 配置变更订阅：主进程用它同步「开机自启」等需要操作系统配合的项。
+const configListeners = new Set()
+function onConfigChanged(fn) {
+  configListeners.add(fn)
+  return () => configListeners.delete(fn)
+}
+
+// 原子写：先写临时文件再 rename，避免写一半崩溃把 config.json 变成半截 JSON
+// （那会让 readConfig() 静默回落成 {}，用户看到的是"设置全丢"）。
 function writeConfig(patch) {
   const cfg = Object.assign(readConfig(), patch)
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2))
+  const tmp = CONFIG_FILE + '.tmp'
+  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2))
+  fs.renameSync(tmp, CONFIG_FILE)
+  for (const fn of configListeners) {
+    try { fn(cfg) } catch (err) { console.warn('[dsh-pet] 配置监听器报错：' + ((err && err.message) || err)) }
+  }
   return cfg
+}
+
+// 预设（单一来源）：读 pet-app/presets/*.json。读不到只降级不崩，但会打日志 ——
+// 静默降级正是这个 fork 之前最难查的一类问题（台词变少 / 角色消失都不报错）。
+function loadPreset(name, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(PRESETS, name), 'utf8'))
+  } catch (err) {
+    console.warn('[dsh-pet] 预设 ' + name + ' 读取失败，使用内置降级值：' + ((err && err.message) || err))
+    return fallback
+  }
 }
 
 // —— 音效：预设组 duck → Ya1/Ya2，fx1 → D1/D2（与插件 assets 同源同名） ——
@@ -44,14 +79,23 @@ const SOUND_SETS = { duck: ['Ya1.mp3', 'Ya2.mp3'], fx1: ['D1.mp3', 'D2.mp3'] }
 // 移植自上游 dsh-whale-widget 的 codexScan()/normalizeCodexRateLimits()（lib/index.js），
 // 这里只需要额度窗口（5h / 周），不需要 token 统计，所以扫描策略简化为：
 // 按 mtime 从新到旧逐个文件找第一个带 rate_limits 的快照（最新会话活动必带），上限 48 个文件。
-const ROLE_NAME = 'gpt娘'
-const ROLE_WHALE = { id: 'whale', name: '小鲸鱼' }
+// 角色清单的唯一来源是 pet-app/presets/roles.json —— server.js 不再写死角色名与图片名。
+const ROLES_FALLBACK = [{ id: 'default', name: 'gpt娘', image: 'DSniang1.png', route: '/dsh-whale/image.png' }]
+const ROLES_PRESET = loadPreset('roles.json', { roles: ROLES_FALLBACK })
+const PRESET_ROLES = Array.isArray(ROLES_PRESET.roles) && ROLES_PRESET.roles.length
+  ? ROLES_PRESET.roles
+  : ROLES_FALLBACK
+const DEFAULT_ROLE_ID = PRESET_ROLES[0].id
+// ⚠️ 这个 id 在代码里有语义（配额口径走 DeepSeek 余额的那个角色），不只是展示名：
+//    改 presets/roles.json 里的 id 时必须同步改这里。
+const DEEPSEEK_ROLE_ID = 'whale'
+
 const codexFileCache = new Map() // file -> { size, mtimeMs, rl, rlTs }
 let codexPlanCache = { at: 0, windows: null, planType: '', sessions: 0 }
 
 function currentRoleId() {
-  const r = readConfig().role
-  return r === 'whale' ? 'whale' : 'default'
+  const id = readConfig().role
+  return PRESET_ROLES.some((r) => r.id === id) ? id : DEFAULT_ROLE_ID
 }
 
 function codexHome() {
@@ -221,118 +265,36 @@ async function dsBalance(force) {
   }
 }
 
-// —— 泡泡队列：按角色下发 ——
-// gpt娘：第 1 泡=Codex 额度+重置（无标题），第 2 泡起=随机台词（GPT 娘社区人设：一本正经胡说八道/
-// 爱分点/健忘/和 Claude 娘她们并称 AI 娘宇宙）。小鲸鱼：不定制 → 前端出厂默认（DeepSeek 余额+随机语句）。
-// —— 泡泡队列：按角色下发 ——
-// gpt娘：第 1 泡=Codex 额度+重置（无标题、单行小字号防溢出），第 2 泡起=随机台词。
-// 台词按社区 GPT 娘人设重写：优等生、严谨博学、略带说教、话痨爱列点、过度道歉、
-// "作为一只语言模型"口癖（与 DeepSeek 娘的直率毒舌形成反差梗，见萌娘百科/梗鲸设定集）。
-// 小鲸鱼：使用上游官方默认队列（运行时从 assets/whale-widget.js 的 BUBBLE_DEFAULT_ITEMS
-// 原样提取，含官方随机语句池）；气泡编辑器改过则以编辑器存的版本为准。
-let defaultItemsCache = null // undefined=未尝试, false=提取失败, 数组=成功
-function whaleDefaultItems() {
-  if (defaultItemsCache !== null) return defaultItemsCache
-  try {
-    const src = fs.readFileSync(path.join(ASSETS, 'whale-widget.js'), 'utf8')
-    const key = 'var BUBBLE_DEFAULT_ITEMS = '
-    const i = src.indexOf(key)
-    if (i >= 0) {
-      const start = src.indexOf('[', i)
-      let depth = 0, inStr = false, esc = false
-      for (let j = start; j < src.length; j++) {
-        const ch = src[j]
-        if (inStr) {
-          if (esc) esc = false
-          else if (ch === '\\') esc = true
-          else if (ch === '"') inStr = false
-          continue
-        }
-        if (ch === '"') inStr = true
-        else if (ch === '[') depth++
-        else if (ch === ']') {
-          depth--
-          if (depth === 0) {
-            defaultItemsCache = JSON.parse(src.slice(start, j + 1))
-            return defaultItemsCache
-          }
-        }
-      }
-    }
-  } catch (err) {}
-  defaultItemsCache = false
-  return defaultItemsCache
-}
-function gptBubbleConfig() {
-  return readConfig().bubbleGpt || null
-}
+// —— 泡泡队列：按角色下发（台词单一来源：pet-app/presets/） ——
+// gpt娘  ：presets/bubbles.json 的 gpt —— 第 1 泡 = Codex 额度 + 重置倒计时（无标题、单行小字号防溢出），
+//          第 2 泡起 = 随机台词。台词按社区 GPT 娘人设维护（优等生、爱列点、过度道歉、
+//          "作为一只语言模型"口癖，与 DeepSeek 娘的直率毒舌形成反差）。
+// 小鲸鱼：气泡编辑器存过的 > presets/bubble-default-whale.json（构建期由
+//          tools/extract-bubble-defaults.mjs 从上游前端 BUBBLE_DEFAULT_ITEMS 抽取）
+//          > presets/bubbles.json 的 whaleFallback。
+// 注意：这里刻意不在运行时长扫描上游前端源码 —— 上游一改写法就会静默降级成"台词变少"，
+//       抽取已挪到构建期，并由 tools/verify-fork.mjs 断言同步。
+const BUBBLES_PRESET = loadPreset('bubbles.json', {})
+const WHALE_DEFAULT_PRESET = loadPreset('bubble-default-whale.json', null)
+
+function emptyQueue() { return { v: 1, tapAdvance: true, lib: [], items: [] } }
 function bubblePayload() {
   const role = currentRoleId()
-  if (role === 'whale') {
-    const stored = readConfig().bubbleWhale
-    if (stored) return { ok: true, config: stored }
-    const official = whaleDefaultItems()
-    if (Array.isArray(official) && official.length) {
-      return { ok: true, config: { v: 1, tapAdvance: true, lib: [], items: official } }
+  const cfg = readConfig()
+  if (role === DEEPSEEK_ROLE_ID) {
+    if (cfg.bubbleWhale) return { ok: true, source: 'stored', config: cfg.bubbleWhale }
+    const official = WHALE_DEFAULT_PRESET && Array.isArray(WHALE_DEFAULT_PRESET.items) ? WHALE_DEFAULT_PRESET.items : null
+    if (official && official.length) {
+      return { ok: true, source: 'upstream-extracted', config: { v: 1, tapAdvance: true, lib: [], items: official } }
     }
-    // 提取失败的手写兜底：上游默认第一泡的简化版（余额口径）
-    return {
-      ok: true,
-      config: {
-        v: 1,
-        tapAdvance: true,
-        lib: [],
-        items: [{
-          kind: 'custom',
-          modules: [
-            { type: 'text', text: 'DeepSeek 余额', size: 8, bold: true, rgb: '', ul: false, italic: false, color: '', row: 1 },
-            { type: 'balance', size: 20, rgb: 'indigo', color: '', tpl: '{balance_ds}', bgRgb: '', bg: '', fontFamily: '', bold: false, row: 1 },
-            { type: 'today', size: 4, color: '#9fb0d9', tpl: '今日已用 {expense_ds}', row: 2 },
-          ],
-        }],
-      },
+    if (BUBBLES_PRESET.whaleFallback) {
+      return { ok: true, source: 'preset-fallback', config: BUBBLES_PRESET.whaleFallback }
     }
+    return { ok: true, source: 'empty', config: emptyQueue() }
   }
-  const stored = gptBubbleConfig()
-  if (stored) return { ok: true, config: stored }
-  return {
-    ok: true,
-    config: {
-      v: 1,
-      tapAdvance: true,
-      lib: [],
-      items: [
-        {
-          kind: 'custom',
-          modules: [
-            { type: 'plan', modelId: 'codex', size: 8, bold: true, tpl: '已用 {plan} · {plan_reset}重置', planWin: 'all', rgb: 'rouge', color: '', bgRgb: '', bg: '', row: 1 },
-          ],
-        },
-        {
-          kind: 'custom',
-          modules: [
-            {
-              type: 'random',
-              lines: [
-                { t: '总之，希望这对你有帮助！', w: 10, bold: true, size: 10 },
-                { t: '我给你列了三个要点哦', w: 10, bold: true, size: 10 },
-                { t: '作为一只语言模型，我觉得…', w: 10, bold: true, size: 10 },
-                { t: '非常抱歉！刚才我说错了', w: 8, bold: true, size: 10 },
-                { t: '放心，我可是优等生AI', w: 10, bold: true, size: 10 },
-                { t: '要再来一份总结吗？免费的', w: 8, bold: true, size: 10 },
-                { t: '今天也是知识渊博的一天呢', w: 10, bold: true, size: 10 },
-                { t: '我从不胡说，只是创意发散', w: 8, bold: true, size: 10 },
-                { t: '说错了也没关系，我会道歉的', w: 8, bold: true, size: 10 },
-                { t: 'DeepSeek 娘说话好直啊…', w: 6, bold: true, size: 10 },
-                { t: 'Claude 娘写的诗太文艺了', w: 6, bold: true, size: 10 },
-                { t: '这个问题嘛，听我慢慢说', w: 8, bold: true, size: 10 },
-              ],
-            },
-          ],
-        },
-      ],
-    },
-  }
+  if (cfg.bubbleGpt) return { ok: true, source: 'stored', config: cfg.bubbleGpt }
+  if (BUBBLES_PRESET.gpt) return { ok: true, source: 'preset', config: BUBBLES_PRESET.gpt }
+  return { ok: true, source: 'empty', config: emptyQueue() }
 }
 
 function send(res, code, body, type) {
@@ -366,21 +328,98 @@ function handle(req, res) {
       if (typeof patch.demo === 'boolean') out.demo = patch.demo
       if (typeof patch.dsKey === 'string') out.dsKey = patch.dsKey.trim()
       if (patch.dsMode === 'total' || patch.dsMode === 'topup') out.dsMode = patch.dsMode
-      writeConfig(out)
+      if (typeof patch.autostart === 'boolean') out.autostart = patch.autostart
+      const cfg = writeConfig(out)
       dsCache = { at: 0, data: null }
-      send(res, 200, '{"ok":true}', MIME['.json'])
+      send(res, 200, JSON.stringify({ ok: true, autostart: cfg.autostart === true }), MIME['.json'])
     })
   }
 
   if (p === '/pet-config.json') {
     const cfg = readConfig()
-    return send(res, 200, JSON.stringify({ demo: cfg.demo === true, dsKey: cfg.dsKey || '', dsMode: cfg.dsMode === 'topup' ? 'topup' : 'total' }), MIME['.json'])
+    return send(res, 200, JSON.stringify({
+      demo: cfg.demo === true,
+      dsKey: cfg.dsKey || '',
+      dsMode: cfg.dsMode === 'topup' ? 'topup' : 'total',
+      autostart: cfg.autostart === true,
+    }), MIME['.json'])
+  }
+
+  // —— 一键导出 / 导入（备份、换机、迁移） ——
+  // 导出 GET /pet-backup.json[?includeKey=1]：默认不含 API Key，避免"随手分享备份"泄露凭据。
+  // 导入 POST /pet-restore，body 为导出内容本身或 { backup: <导出内容> }。
+  // 两侧都只认 CONFIG_KEYS 白名单，未知字段一律忽略。
+  if (p === '/pet-backup.json' && req.method === 'GET') {
+    const cfg = readConfig()
+    const includeKey = u.searchParams.get('includeKey') === '1'
+    const backup = {
+      app: 'dsh-pet-desktop',
+      version: BACKUP_VERSION,
+      exportedAt: new Date().toISOString(),
+      includesKey: includeKey,
+      config: {},
+    }
+    for (const k of CONFIG_KEYS) {
+      if (k === 'dsKey') {
+        if (includeKey && cfg.dsKey) backup.secret = { dsKey: cfg.dsKey }
+        continue
+      }
+      if (cfg[k] !== undefined) backup.config[k] = cfg[k]
+    }
+    const body = JSON.stringify(backup, null, 2)
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Length': String(Buffer.byteLength(body)),
+      'Cache-Control': 'no-store',
+      'Content-Disposition': 'attachment; filename="dsh-pet-backup.json"',
+    })
+    return res.end(body)
+  }
+  if (p === '/pet-restore' && req.method === 'POST') {
+    return readBody(req, (body) => {
+      let parsed = null
+      try {
+        parsed = JSON.parse(body || '{}')
+      } catch (err) {
+        return send(res, 400, '{"ok":false,"error":"body 不是合法 JSON"}', MIME['.json'])
+      }
+      const backup = parsed && parsed.backup && typeof parsed.backup === 'object' ? parsed.backup : parsed
+      if (!backup || typeof backup !== 'object' || Array.isArray(backup)) {
+        return send(res, 400, '{"ok":false,"error":"缺少 backup 内容"}', MIME['.json'])
+      }
+      const src = backup.config && typeof backup.config === 'object' ? backup.config : {}
+      const patch = {}
+      const applied = []
+      for (const k of CONFIG_KEYS) {
+        if (k === 'dsKey' || src[k] === undefined) continue
+        if ((k === 'demo' || k === 'autostart') && typeof src[k] !== 'boolean') continue
+        if (k === 'dsMode' && src[k] !== 'total' && src[k] !== 'topup') continue
+        if (k === 'role' && !PRESET_ROLES.some((r) => r.id === src[k])) continue
+        if ((k === 'widget' || k === 'bubbleGpt' || k === 'bubbleWhale') &&
+          (!src[k] || typeof src[k] !== 'object' || Array.isArray(src[k]))) continue
+        patch[k] = src[k]
+        applied.push(k)
+      }
+      if (backup.secret && typeof backup.secret.dsKey === 'string' && backup.secret.dsKey.trim()) {
+        patch.dsKey = backup.secret.dsKey.trim()
+        applied.push('dsKey')
+      }
+      if (!applied.length) {
+        return send(res, 400, '{"ok":false,"error":"备份里没有可应用的字段"}', MIME['.json'])
+      }
+      writeConfig(patch)
+      dsCache = { at: 0, data: null }
+      send(res, 200, JSON.stringify({ ok: true, applied }), MIME['.json'])
+    })
   }
 
   if (p === '/dsh-whale/widget.js') return sendFile(res, path.join(ASSETS, 'whale-widget.js'))
   if (p === '/dsh-whale/image.png') {
-    const f = fs.existsSync(path.join(ASSETS, 'DSniang1.png')) ? 'DSniang1.png' : 'DSniang02.png'
-    return sendFile(res, path.join(ASSETS, f))
+    // 默认角色图取自 presets/roles.json（单一来源）；文件缺失时兼容旧文件名
+    const def = PRESET_ROLES.find((r) => r.id === DEFAULT_ROLE_ID) || PRESET_ROLES[0]
+    const candidates = [def && def.image, 'DSniang1.png', 'DSniang02.png'].filter(Boolean)
+    const hit = candidates.map((f) => path.join(ASSETS, String(f))).find((f) => fs.existsSync(f))
+    return hit ? sendFile(res, hit) : send(res, 404, 'image missing')
   }
   if (p === '/dsh-whale/rua.gif') return sendFile(res, path.join(ASSETS, 'rua.gif'))
   if (p === '/dsh-whale/balance.json') {
@@ -421,17 +460,27 @@ function handle(req, res) {
     })
   }
   if (p === '/dsh-whale/roles.json') {
+    // 角色清单 = presets/roles.json（角色名/图片/顺序都改那一份即可）
     return send(res, 200, JSON.stringify({
       ok: true,
-      roles: [
-        { id: 'default', name: ROLE_NAME, url: '/dsh-whale/image.png', pinned: true, pinnedAt: 2, createdAt: 1, format: 'png' },
-        { id: ROLE_WHALE.id, name: ROLE_WHALE.name, url: '/dsh-whale/role-image.png?id=whale', pinned: false, pinnedAt: 1, createdAt: 0, format: 'png' },
-      ],
+      roles: PRESET_ROLES.map((r) => ({
+        id: r.id,
+        name: r.name,
+        url: r.route,
+        pinned: r.pinned === true,
+        pinnedAt: Number(r.pinnedAt) || 0,
+        createdAt: Number(r.createdAt) || 0,
+        format: 'png',
+      })),
     }), MIME['.json'])
   }
   if (p === '/dsh-whale/role-image.png') {
-    if (u.searchParams.get('id') === 'whale') return sendFile(res, path.join(ASSETS, 'ds-whale.png'))
-    return send(res, 404, 'unknown role')
+    const id = u.searchParams.get('id') || ''
+    const role = PRESET_ROLES.find((r) => r.id === id)
+    if (!role) return send(res, 404, 'unknown role')
+    const file = path.join(ASSETS, String(role.image || ''))
+    if (!fs.existsSync(file)) return send(res, 404, 'role image missing: ' + role.image)
+    return sendFile(res, file)
   }
   if (p === '/dsh-whale/api-models.json' && req.method === 'GET') {
     return Promise.all([codexPlan(), currentRoleId() === 'whale' ? dsBalance(false) : Promise.resolve(null)]).then(([_, ds]) => {
@@ -467,7 +516,7 @@ function handle(req, res) {
         try {
           const parsed = JSON.parse(body || '{}')
           if (parsed && parsed.config) {
-            writeConfig(currentRoleId() === 'whale' ? { bubbleWhale: parsed.config } : { bubbleGpt: parsed.config })
+            writeConfig(currentRoleId() === DEEPSEEK_ROLE_ID ? { bubbleWhale: parsed.config } : { bubbleGpt: parsed.config })
             return send(res, 200, '{"ok":true}', MIME['.json'])
           }
         } catch (err) {}
@@ -518,7 +567,14 @@ function startServer(cb) {
   return server
 }
 
-module.exports = { startServer }
+module.exports = {
+  startServer,
+  readConfig,
+  writeConfig,
+  onConfigChanged,
+  CONFIG_PATH: CONFIG_FILE,
+  PRESET_ROLES,
+}
 
 if (require.main === module) {
   startServer((err, port) => {

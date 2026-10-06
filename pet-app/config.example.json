@@ -1,1 +1,16 @@
-{"demo": true}
+{
+  "_说明": [
+    "把本文件复制成 config.json 使用。config.json 已被 .gitignore 忽略 —— 它可能含 API Key。",
+    "demo: 演示模式（不读 ~/.codex 日志，固定显示演示额度）",
+    "dsKey: DeepSeek API Key，只在「小鲸鱼」角色的余额口径下使用",
+    "dsMode: total = 账户总额（充值 + 赠金）/ topup = 仅充值余额",
+    "role: 当前角色 id，取值见 presets/roles.json",
+    "autostart: 开机自启，等价于设置页 / 托盘菜单里的开关",
+    "widget / bubbleGpt / bubbleWhale: 由挂件界面自己读写，一般不需要手填"
+  ],
+  "demo": false,
+  "dsKey": "",
+  "dsMode": "total",
+  "role": "default",
+  "autostart": false
+}

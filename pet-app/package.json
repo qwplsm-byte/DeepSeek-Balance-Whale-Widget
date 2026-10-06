@@ -5,7 +5,10 @@
   "main": "main.js",
   "private": true,
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "verify": "node ../tools/verify-fork.mjs",
+    "smoke": "node ../tools/smoke-pet.mjs",
+    "extract-bubbles": "node ../tools/extract-bubble-defaults.mjs"
   },
   "devDependencies": {
     "electron": "^33.0.0"

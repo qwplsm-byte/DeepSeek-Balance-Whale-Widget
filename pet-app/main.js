@@ -5,11 +5,18 @@
 
 const { app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage, shell } = require('electron')
 const path = require('path')
-const { startServer } = require('./server')
+const { startServer, readConfig, writeConfig, onConfigChanged, PRESET_ROLES } = require('./server')
 
 let win = null
 let tray = null
 let port = 0
+
+// 托盘图标取自 presets/roles.json 的第一个角色（角色清单是单一来源），缺文件再回退
+function roleIconPath() {
+  const first = PRESET_ROLES[0] || {}
+  const name = String(first.image || 'DSniang1.png')
+  return path.join(__dirname, 'assets', name)
+}
 
 function createWindow() {
   // 全工作区透明窗：挂件在页面内可拖到屏幕任何角落（挂件自己的拖动就是在视口内移动）。
@@ -45,32 +52,74 @@ function createWindow() {
   win.on('closed', () => { win = null })
 }
 
-function createTray() {
-  const icon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'DSniang1.png'))
-  tray = new Tray(icon.resize({ width: 16, height: 16 }))
-  tray.setToolTip('dsh-pet 桌面宠物')
-  tray.setContextMenu(Menu.buildFromTemplate([
+// —— 开机自启 ——
+// 唯一数据源是 config.json 的 autostart：设置页写配置 → server 触发 onConfigChanged → 这里落到系统。
+// 启动时也应用一次，让"手动改过 config.json"或"配置从别的机器导过来"的情况不错位。
+function applyAutostart() {
+  try {
+    const on = readConfig().autostart === true
+    const opts = { openAtLogin: on, path: process.execPath }
+    // 开发态（electron . 起）不加 app 路径的话，登录启动只会拉起一个空 Electron
+    if (!app.isPackaged) opts.args = [app.getAppPath()]
+    app.setLoginItemSettings(opts)
+    if (tray) tray.setContextMenu(buildTrayMenu())
+    return on
+  } catch (err) {
+    console.warn('[dsh-pet] 设置开机自启失败：' + ((err && err.message) || err))
+    return false
+  }
+}
+
+function buildTrayMenu() {
+  return Menu.buildFromTemplate([
     { label: '显示 / 隐藏宠物', click: () => { if (win) { win.isVisible() ? win.hide() : win.show() } } },
-    { label: '设置（API Key / 演示模式）', click: () => shell.openExternal('http://127.0.0.1:' + port + '/config') },
+    { label: '设置（API Key / 演示模式 / 开机自启）', click: () => shell.openExternal('http://127.0.0.1:' + port + '/config') },
+    { type: 'separator' },
+    {
+      label: '开机自启',
+      type: 'checkbox',
+      checked: readConfig().autostart === true,
+      // 写配置即可：writeConfig 会触发 onConfigChanged → applyAutostart() 落到系统并刷新本菜单
+      click: (item) => { writeConfig({ autostart: item.checked === true }) },
+    },
     { type: 'separator' },
     { label: '退出', click: () => app.quit() },
-  ]))
+  ])
+}
+
+function createTray() {
+  const icon = nativeImage.createFromPath(roleIconPath())
+  tray = new Tray(icon.resize({ width: 16, height: 16 }))
+  tray.setToolTip('dsh-pet 桌面宠物')
+  tray.setContextMenu(buildTrayMenu())
 }
 
 ipcMain.on('pet-mouse', (_ev, interactive) => {
   if (win) win.setIgnoreMouseEvents(!interactive, { forward: true })
 })
 
-app.whenReady().then(() => {
-  startServer((err, p) => {
-    if (err) { app.quit(); return }
-    port = p
-    createWindow()
-    createTray()
+// 单实例锁：开机自启与手动双击可能同时发生，别出现两只宠物抢同一个端口
+const gotLock = app.requestSingleInstanceLock()
+if (!gotLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (win) { win.show(); win.focus() }
   })
-  app.on('activate', () => { if (!win) createWindow() })
-})
 
-app.on('window-all-closed', () => {
-  // 有托盘常驻：关窗不退出，从托盘菜单退出
-})
+  app.whenReady().then(() => {
+    onConfigChanged(() => applyAutostart())
+    startServer((err, p) => {
+      if (err) { app.quit(); return }
+      port = p
+      createWindow()
+      createTray()
+      applyAutostart()
+    })
+    app.on('activate', () => { if (!win) createWindow() })
+  })
+
+  app.on('window-all-closed', () => {
+    // 有托盘常驻：关窗不退出，从托盘菜单退出
+  })
+}

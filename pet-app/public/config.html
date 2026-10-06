@@ -18,8 +18,14 @@
   button { margin-top: 20px; width: 100%; padding: 10px; border: 0; border-radius: 8px;
     background: #3b5bdb; color: #fff; font-size: 14px; cursor: pointer; }
   button:hover { background: #364fc7; }
+  button.ghost { background: rgba(32,49,112,.08); color: #203170; margin-top: 0; }
+  button.ghost:hover { background: rgba(32,49,112,.16); }
   #msg { margin-top: 12px; font-size: 13px; text-align: center; color: #2f9e44; min-height: 18px; }
+  #msg.err { color: #c0392b; }
   code { background: #eef1f8; padding: 1px 5px; border-radius: 4px; }
+  .btns { display: flex; gap: 8px; margin-top: 10px; }
+  .btns button { flex: 1; }
+  .file { display: none; }
 </style>
 </head>
 <body>
@@ -42,16 +48,46 @@
   <div class="radio"><label style="font-weight:400"><input type="radio" name="dsmode" value="total" checked> 账户总额（充值 + 赠金）</label></div>
   <div class="radio"><label style="font-weight:400"><input type="radio" name="dsmode" value="topup"> 仅充值余额（不含赠金）</label></div>
 
+  <h2>启动</h2>
+  <div class="row">
+    <input type="checkbox" id="autostart">
+    <span>开机自启（登录后自动运行，托盘菜单里也能切）</span>
+  </div>
+
   <button id="save">保存</button>
   <div id="msg"></div>
+
+  <h2>备份 / 迁移</h2>
+  <p class="tip">导出会把本机配置（外观、气泡、角色、开机自启、演示模式）打包成一个 JSON；导入按字段白名单覆盖，
+    未识别的字段会被忽略。默认<b>不含 API Key</b>，需要连 Key 一起带走时勾选下面的选项。</p>
+  <div class="row">
+    <input type="checkbox" id="withkey">
+    <span>导出时包含 DeepSeek API Key（<b>明文</b>，别随手分享）</span>
+  </div>
+  <div class="btns">
+    <button class="ghost" id="exp">导出配置</button>
+    <button class="ghost" id="imp">导入配置</button>
+  </div>
+  <input type="file" id="impfile" class="file" accept="application/json,.json">
 </div>
 <script>
-fetch('/pet-config.json').then(function (r) { return r.json() }).then(function (d) {
+var msgEl = document.getElementById('msg')
+function say(text, isErr) {
+  msgEl.textContent = text
+  msgEl.className = isErr ? 'err' : ''
+}
+function fill(d) {
   document.getElementById('demo').checked = d.demo === true
   document.getElementById('dskey').value = d.dsKey || ''
+  document.getElementById('autostart').checked = d.autostart === true
   var radios = document.getElementsByName('dsmode')
   for (var i = 0; i < radios.length; i++) radios[i].checked = (radios[i].value === (d.dsMode || 'total'))
-}).catch(function () {})
+}
+function load() {
+  fetch('/pet-config.json').then(function (r) { return r.json() }).then(fill).catch(function () {})
+}
+load()
+
 document.getElementById('save').onclick = function () {
   var mode = 'total'
   var radios = document.getElementsByName('dsmode')
@@ -59,10 +95,54 @@ document.getElementById('save').onclick = function () {
   fetch('/config', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ demo: document.getElementById('demo').checked, dsKey: document.getElementById('dskey').value, dsMode: mode })
+    body: JSON.stringify({
+      demo: document.getElementById('demo').checked,
+      dsKey: document.getElementById('dskey').value,
+      dsMode: mode,
+      autostart: document.getElementById('autostart').checked
+    })
   }).then(function (r) { return r.json() }).then(function (d) {
-    document.getElementById('msg').textContent = d.ok ? '已保存，挂件将在一分钟内刷新' : '保存失败'
-  }).catch(function () { document.getElementById('msg').textContent = '保存失败' })
+    if (!d.ok) { say('保存失败', true); return }
+    document.getElementById('autostart').checked = d.autostart === true
+    say('已保存，挂件将在一分钟内刷新')
+  }).catch(function () { say('保存失败', true) })
+}
+
+document.getElementById('exp').onclick = function () {
+  var url = '/pet-backup.json' + (document.getElementById('withkey').checked ? '?includeKey=1' : '')
+  var a = document.createElement('a')
+  a.href = url
+  a.download = 'dsh-pet-backup.json'
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  say(document.getElementById('withkey').checked ? '已导出（含 API Key）' : '已导出（不含 API Key）')
+}
+
+document.getElementById('imp').onclick = function () {
+  document.getElementById('impfile').click()
+}
+document.getElementById('impfile').onchange = function (e) {
+  var f = e.target.files && e.target.files[0]
+  if (!f) return
+  var reader = new FileReader()
+  reader.onload = function () {
+    var text = String(reader.result || '')
+    var parsed = null
+    try { parsed = JSON.parse(text) } catch (err) { say('这个文件不是合法 JSON', true); return }
+    fetch('/pet-restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(parsed)
+    }).then(function (r) { return r.json() }).then(function (d) {
+      if (!d.ok) { say('导入失败：' + (d.error || '未知原因'), true); return }
+      say('已导入：' + d.applied.join('、'))
+      load()
+    }).catch(function () { say('导入失败', true) })
+  }
+  reader.onerror = function () { say('读取文件失败', true) }
+  reader.readAsText(f)
+  e.target.value = ''
 }
 </script>
 </body>
