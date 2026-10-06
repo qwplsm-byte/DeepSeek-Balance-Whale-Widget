@@ -30,3 +30,4 @@ _patch_*.patch
 
 # pet-app（独立桌面宠物）
 pet-app/node_modules/
+pet-app/config.json
