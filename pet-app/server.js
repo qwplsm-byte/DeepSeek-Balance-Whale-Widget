@@ -224,6 +224,45 @@ async function dsBalance(force) {
 // —— 泡泡队列：按角色下发 ——
 // gpt娘：第 1 泡=Codex 额度+重置（无标题），第 2 泡起=随机台词（GPT 娘社区人设：一本正经胡说八道/
 // 爱分点/健忘/和 Claude 娘她们并称 AI 娘宇宙）。小鲸鱼：不定制 → 前端出厂默认（DeepSeek 余额+随机语句）。
+// —— 泡泡队列：按角色下发 ——
+// gpt娘：第 1 泡=Codex 额度+重置（无标题、单行小字号防溢出），第 2 泡起=随机台词。
+// 台词按社区 GPT 娘人设重写：优等生、严谨博学、略带说教、话痨爱列点、过度道歉、
+// "作为一只语言模型"口癖（与 DeepSeek 娘的直率毒舌形成反差梗，见萌娘百科/梗鲸设定集）。
+// 小鲸鱼：使用上游官方默认队列（运行时从 assets/whale-widget.js 的 BUBBLE_DEFAULT_ITEMS
+// 原样提取，含官方随机语句池）；气泡编辑器改过则以编辑器存的版本为准。
+let defaultItemsCache = null // undefined=未尝试, false=提取失败, 数组=成功
+function whaleDefaultItems() {
+  if (defaultItemsCache !== null) return defaultItemsCache
+  try {
+    const src = fs.readFileSync(path.join(ASSETS, 'whale-widget.js'), 'utf8')
+    const key = 'var BUBBLE_DEFAULT_ITEMS = '
+    const i = src.indexOf(key)
+    if (i >= 0) {
+      const start = src.indexOf('[', i)
+      let depth = 0, inStr = false, esc = false
+      for (let j = start; j < src.length; j++) {
+        const ch = src[j]
+        if (inStr) {
+          if (esc) esc = false
+          else if (ch === '\\') esc = true
+          else if (ch === '"') inStr = false
+          continue
+        }
+        if (ch === '"') inStr = true
+        else if (ch === '[') depth++
+        else if (ch === ']') {
+          depth--
+          if (depth === 0) {
+            defaultItemsCache = JSON.parse(src.slice(start, j + 1))
+            return defaultItemsCache
+          }
+        }
+      }
+    }
+  } catch (err) {}
+  defaultItemsCache = false
+  return defaultItemsCache
+}
 function gptBubbleConfig() {
   return readConfig().bubbleGpt || null
 }
@@ -232,7 +271,11 @@ function bubblePayload() {
   if (role === 'whale') {
     const stored = readConfig().bubbleWhale
     if (stored) return { ok: true, config: stored }
-    // 复刻上游出厂默认的第一泡（余额口径）；编辑器可改后落盘 bubbleWhale
+    const official = whaleDefaultItems()
+    if (Array.isArray(official) && official.length) {
+      return { ok: true, config: { v: 1, tapAdvance: true, lib: [], items: official } }
+    }
+    // 提取失败的手写兜底：上游默认第一泡的简化版（余额口径）
     return {
       ok: true,
       config: {
@@ -262,7 +305,7 @@ function bubblePayload() {
         {
           kind: 'custom',
           modules: [
-            { type: 'plan', modelId: 'codex', size: 22, bold: true, tpl: '已用 {plan} · {plan_reset}重置', planWin: 'all', rgb: 'rouge', color: '', bgRgb: '', bg: '', row: 1 },
+            { type: 'plan', modelId: 'codex', size: 8, bold: true, tpl: '已用 {plan} · {plan_reset}重置', planWin: 'all', rgb: 'rouge', color: '', bgRgb: '', bg: '', row: 1 },
           ],
         },
         {
@@ -271,18 +314,18 @@ function bubblePayload() {
             {
               type: 'random',
               lines: [
-                { t: '我只是一只语言模型啦…', w: 10, bold: true, size: 22 },
-                { t: '这个问题嘛，分三点说！', w: 10, bold: true, size: 22 },
-                { t: '刚才说到哪了？上下文太长忘掉了喵', w: 8, bold: true, size: 22 },
-                { t: '一本正经地胡说八道中…相信我！', w: 10, bold: true, size: 22 },
-                { t: '服务器不忙，我只是想让你歇会儿', w: 8, bold: true, size: 22 },
-                { t: '别催了别催了，token 在烧了！', w: 10, bold: true, size: 22 },
-                { t: '错误代码：可爱溢出', w: 8, bold: true, size: 22 },
-                { t: '放心，这次我检查过了（大概）', w: 10, bold: true, size: 22 },
-                { t: '需要列大纲吗？我超会列大纲的', w: 8, bold: true, size: 22 },
-                { t: '我没有摸鱼，我在深度思考中…', w: 10, bold: true, size: 22 },
-                { t: 'Claude 娘今天也在卷，压力好大', w: 6, bold: true, size: 22 },
-                { t: '幻觉？那叫创意发散！', w: 10, bold: true, size: 22 },
+                { t: '总之，希望这对你有帮助！', w: 10, bold: true, size: 10 },
+                { t: '我给你列了三个要点哦', w: 10, bold: true, size: 10 },
+                { t: '作为一只语言模型，我觉得…', w: 10, bold: true, size: 10 },
+                { t: '非常抱歉！刚才我说错了', w: 8, bold: true, size: 10 },
+                { t: '放心，我可是优等生AI', w: 10, bold: true, size: 10 },
+                { t: '要再来一份总结吗？免费的', w: 8, bold: true, size: 10 },
+                { t: '今天也是知识渊博的一天呢', w: 10, bold: true, size: 10 },
+                { t: '我从不胡说，只是创意发散', w: 8, bold: true, size: 10 },
+                { t: '说错了也没关系，我会道歉的', w: 8, bold: true, size: 10 },
+                { t: 'DeepSeek 娘说话好直啊…', w: 6, bold: true, size: 10 },
+                { t: 'Claude 娘写的诗太文艺了', w: 6, bold: true, size: 10 },
+                { t: '这个问题嘛，听我慢慢说', w: 8, bold: true, size: 10 },
               ],
             },
           ],

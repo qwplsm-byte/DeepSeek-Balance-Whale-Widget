@@ -15136,11 +15136,17 @@ function applyRole(id, name, url) {
   img.src = url
   setRoleBtnText(name)
   try { localStorage.setItem('dshw-role', id) } catch (err) {}
-  // custom-pet：告知宿主当前角色（独立宠物端按角色切换额度口径/泡泡/记账文案；DSH 端 404 静默忽略）
-  try { fetch('/dsh-whale/role-current.json', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id }) }).catch(function () {}) } catch (err) {}
-  // 角色切换后立即换泡泡队列与额度数据（平时各自有 60s 周期，这里不等）
-  try { refreshBubbleCfgFromHost(function () {}) } catch (err) {}
-  try { refresh(false) } catch (err) {}
+  // custom-pet：告知宿主当前角色（独立宠物端按角色切换额度口径/泡泡/记账文案；DSH 端 404 静默忽略）。
+  // ⚠️ 必须等 PUT 落地后再拉泡泡/余额：三个请求并发时 GET 可能先到、宿主还按旧角色应答，
+  // 表现就是「切完角色首击还是旧口径」（实测踩过）。
+  try {
+    fetch('/dsh-whale/role-current.json', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id }) })
+      .catch(function () {})
+      .then(function () {
+        try { refreshBubbleCfgFromHost(function () {}) } catch (err) {}
+        try { refresh(false) } catch (err) {}
+      })
+  } catch (err) {}
   usageRecRefresh()
   hitReady = false
   hitFailed = false
