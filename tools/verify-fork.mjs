@@ -137,7 +137,19 @@ check('presets/bubbles.json', () => {
     assert(typeof l.w === 'number' && l.w > 0, '随机台词缺少权重 w：' + l.t)
   }
   assert(data.whaleFallback && data.whaleFallback.items, 'whaleFallback 缺失（上游抽取失败时的兜底）')
-  return gpt.items.length + ' 泡 / 随机台词 ' + lines.length + ' 句'
+  // 生气台词：三档都必须有（情绪系统 1/2/3 档各取一池）
+  assert(data.gptAngry && typeof data.gptAngry === 'object', 'gptAngry 缺失（情绪系统的生气台词池）')
+  let angryTotal = 0
+  for (const lv of ['1', '2', '3']) {
+    const pool = data.gptAngry[lv]
+    assert(Array.isArray(pool) && pool.length, 'gptAngry["' + lv + '"] 必须是非空数组')
+    for (const l of pool) {
+      assert(typeof l.t === 'string' && l.t, 'gptAngry[' + lv + '] 有台词缺少 t')
+      assert(typeof l.w === 'number' && l.w > 0, 'gptAngry[' + lv + '] 有台词缺少权重 w：' + l.t)
+    }
+    angryTotal += pool.length
+  }
+  return gpt.items.length + ' 泡 / 台词 ' + lines.length + ' 句 / 生气台词 ' + angryTotal + ' 句（3 档）'
 })
 
 check('上游默认台词队列已同步（bubble-default-whale.json）', () => {
@@ -198,6 +210,27 @@ check('角色图 PNG 结构（3 个文件）', () => {
     details.push(f.split('/').pop() + ' ' + info.ihdr.width + 'x' + info.ihdr.height)
   }
   return details.join(' / ')
+})
+
+check('情绪素材（pet-app/assets/mood）', () => {
+  const dir = path.join(ROOT, 'pet-app', 'assets', 'mood')
+  assert(fs.existsSync(dir), 'pet-app/assets/mood 不存在（情绪系统需要 idle.png / angry.png）')
+  const info = {}
+  for (const f of ['idle.png', 'angry.png']) {
+    const abs = path.join(dir, f)
+    assert(fs.existsSync(abs), '缺少 ' + f + '（生成：python tools/make-mood-sprites.py --idle <原图> --angry <原图>）')
+    const i = parsePng(abs)
+    assert(i.sawIend && i.chunks.includes('IDAT'), f + ' 结构异常')
+    const bad = i.chunks.filter((c) => !PNG_CHUNK_WHITELIST.includes(c))
+    assert(!bad.length, f + ' 含非白名块：' + [...new Set(bad)].join(', '))
+    const hasAlpha = i.ihdr.colorType === 6 || (i.ihdr.colorType === 3 && i.chunks.includes('tRNS'))
+    assert(hasAlpha, f + ' 没有透明通道')
+    info[f] = i.ihdr.width + 'x' + i.ihdr.height
+  }
+  // 两个状态必须同尺寸：否则切换时角色会跳位（生成脚本用固定窗口保证，这里上锁）
+  assert(info['idle.png'] === info['angry.png'],
+    'idle 与 angry 尺寸不一致（' + info['idle.png'] + ' vs ' + info['angry.png'] + '）—— 情绪切换会跳位')
+  return 'idle/angry 均为 ' + info['idle.png']
 })
 
 // —— ⑤ 密钥卫生 ——
