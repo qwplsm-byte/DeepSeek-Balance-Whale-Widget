@@ -1,0 +1,72 @@
+{
+  "_说明": [
+    "dsh-pet 预设：台词队列（单一来源）。",
+    "server.js 的 /dsh-whale/bubble.json 直接下发这里的对象，不要再把同一句台词抄进 server.js 或前端。",
+    "优先级：stored（气泡编辑器存过）> 本文件 > bubble-default-whale.json（上游默认，构建期抽取）。",
+    "gpt = gpt娘出厂队列（第 1 泡 = Codex 额度 + 重置倒计时；第 2 泡起 = 随机台词）；whaleFallback = 小鲸鱼兜底队列，仅当上游默认抽取失败时使用。",
+    "改台词只需改这个文件；node tools/verify-fork.mjs 会校验结构。"
+  ],
+  "version": 1,
+  "gpt": {
+    "v": 1,
+    "tapAdvance": true,
+    "lib": [],
+    "items": [
+      {
+        "kind": "custom",
+        "modules": [
+          {
+            "type": "plan",
+            "modelId": "codex",
+            "size": 8,
+            "bold": true,
+            "tpl": "已用 {plan} · {plan_reset}重置",
+            "planWin": "all",
+            "rgb": "rouge",
+            "color": "",
+            "bgRgb": "",
+            "bg": "",
+            "row": 1
+          }
+        ]
+      },
+      {
+        "kind": "custom",
+        "modules": [
+          {
+            "type": "random",
+            "lines": [
+              { "t": "总之，希望这对你有帮助！", "w": 10, "bold": true, "size": 10 },
+              { "t": "我给你列了三个要点哦", "w": 10, "bold": true, "size": 10 },
+              { "t": "作为一只语言模型，我觉得…", "w": 10, "bold": true, "size": 10 },
+              { "t": "非常抱歉！刚才我说错了", "w": 8, "bold": true, "size": 10 },
+              { "t": "放心，我可是优等生AI", "w": 10, "bold": true, "size": 10 },
+              { "t": "要再来一份总结吗？免费的", "w": 8, "bold": true, "size": 10 },
+              { "t": "今天也是知识渊博的一天呢", "w": 10, "bold": true, "size": 10 },
+              { "t": "我从不胡说，只是创意发散", "w": 8, "bold": true, "size": 10 },
+              { "t": "说错了也没关系，我会道歉的", "w": 8, "bold": true, "size": 10 },
+              { "t": "DeepSeek 娘说话好直啊…", "w": 6, "bold": true, "size": 10 },
+              { "t": "Claude 娘写的诗太文艺了", "w": 6, "bold": true, "size": 10 },
+              { "t": "这个问题嘛，听我慢慢说", "w": 8, "bold": true, "size": 10 }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "whaleFallback": {
+    "v": 1,
+    "tapAdvance": true,
+    "lib": [],
+    "items": [
+      {
+        "kind": "custom",
+        "modules": [
+          { "type": "text", "text": "DeepSeek 余额", "size": 8, "bold": true, "rgb": "", "ul": false, "italic": false, "color": "", "row": 1 },
+          { "type": "balance", "size": 20, "rgb": "indigo", "color": "", "tpl": "{balance_ds}", "bgRgb": "", "bg": "", "fontFamily": "", "bold": false, "row": 1 },
+          { "type": "today", "size": 4, "color": "#9fb0d9", "tpl": "今日已用 {expense_ds}", "row": 2 }
+        ]
+      }
+    ]
+  }
+}

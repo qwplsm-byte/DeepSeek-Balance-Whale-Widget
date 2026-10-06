@@ -1,0 +1,29 @@
+{
+  "_说明": [
+    "dsh-pet 预设：角色清单（单一来源）。",
+    "server.js 的 /dsh-whale/roles.json 与 /dsh-whale/role-image.png 都读这里，不要在 server.js 里再写一份角色名/图片名。",
+    "image = pet-app/assets/ 下的文件名（角色图本体）；route = 前端拿图使用的 URL。",
+    "default 角色的 route 固定为 /dsh-whale/image.png；其余角色走 /dsh-whale/role-image.png?id=<id>。"
+  ],
+  "version": 1,
+  "roles": [
+    {
+      "id": "default",
+      "name": "gpt娘",
+      "image": "DSniang1.png",
+      "route": "/dsh-whale/image.png",
+      "pinned": true,
+      "pinnedAt": 2,
+      "createdAt": 1
+    },
+    {
+      "id": "whale",
+      "name": "小鲸鱼",
+      "image": "ds-whale.png",
+      "route": "/dsh-whale/role-image.png?id=whale",
+      "pinned": false,
+      "pinnedAt": 1,
+      "createdAt": 0
+    }
+  ]
+}
