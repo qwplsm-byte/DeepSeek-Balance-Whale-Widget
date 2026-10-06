@@ -14,5 +14,8 @@ if not exist "node_modules\electron\dist\electron.exe" (
   pause
   exit /b 1
 )
-start "" "%~dp0node_modules\electron\dist\electron.exe" "%~dp0"
+rem App path keeps a trailing dot on purpose: "%~dp0" already ends with a backslash,
+rem and a backslash right before the closing quote escapes that quote, so Electron
+rem would get a broken path and pop up "Unable to find Electron app / Cannot find module".
+start "" "%~dp0node_modules\electron\dist\electron.exe" "%~dp0."
 exit /b 0
