@@ -102,3 +102,19 @@ jobs:
             if (p.name !== 'dsh-whale-widget') { console.error('包名意外: ' + p.name); process.exit(1) }
             console.log('package.json OK: ' + p.name + '@' + p.version)
           "
+
+      # pet-app（独立桌宠）门禁，零依赖、不 spawn 子进程：
+      #   ① 两份 862 KB 前端副本必须逐字节一致（assets/ 与 pet-app/assets/ 靠人工双改，迟早分叉）
+      #   ② presets/{roles,bubbles}.json 结构 + 上游默认台词队列快照是否同步
+      #   ③ 角色图 PNG 结构（透明通道 / 块白名单 / 尺寸 / 体积）——挡"忘了去黑底、忘了裁气泡"
+      #   ④ pet-app/config.json（含 API Key）必须仍在 .gitignore 且未被跟踪
+      #   ⑤ dist/*.zip 存在时，包内 assets/whale-widget.js 必须与仓库副本同哈希
+      # 第 ⑤ 项就是 custom-pet 踩过的坑：发出去的 zip 里前端还是上游原版字节。
+      - name: pet-app verify (fork gate)
+        run: node tools/verify-fork.mjs
+
+      # pet-app 冒烟（不需要 Electron）：把 pet-app 复制到临时目录起服务，跑一遍
+      # 角色清单 / 台词队列按角色切换 / 导出导入白名单 / size.json 透传 / 未知端点 404。
+      # 复制到临时目录是为了不碰开发机上的 pet-app/config.json（那里有 API Key）。
+      - name: pet-app smoke
+        run: node tools/smoke-pet.mjs

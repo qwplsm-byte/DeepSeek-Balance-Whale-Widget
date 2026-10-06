@@ -111,6 +111,11 @@ jobs:
       - name: Core invariants audit (incl. packed artifact)
         run: node tools/ci-audit.mjs
 
+      # pet-app（独立桌宠）门禁：前端双副本一致、预设与上游默认台词同步、PNG 结构、
+      # config.json 未入库、dist/*.zip 内的前端哈希与仓库一致。零依赖、不 spawn。
+      - name: pet-app verify (fork gate)
+        run: node tools/verify-fork.mjs
+
       # 当前版本是否已发布过（避免重复触发同一版本时发布失败炸掉 workflow）
       - name: Check if version already published
         id: check
