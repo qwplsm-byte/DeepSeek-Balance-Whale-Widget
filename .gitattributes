@@ -12,3 +12,10 @@
 *.mp3 binary
 *.ico binary
 *.zip binary
+
+# 例外：Windows 批处理（.bat / .cmd）必须按 CRLF 检出，且内容保持纯 ASCII。
+#   · cmd.exe 在 if(...) 块里遇到 LF-only 行尾会解析错乱（实测报「'ron.exe" (' 不是内部或外部命令」）；
+#   · cmd 按 OEM 代码页（简中 = GBK）读 .bat，写 UTF-8 中文会变成乱码命令（实测报「'cho' 不是内部或外部命令」）。
+#   批处理不参与 npm 发布产物，因此不受上面「发布副本必须逐字节一致」的约束。
+*.bat text eol=crlf
+*.cmd text eol=crlf
