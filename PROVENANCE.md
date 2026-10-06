@@ -22,6 +22,7 @@
 | `bubble-money1.gif` | 内置泡泡图（余额预警默认内容的配图）。 |
 | `Ya1.mp3` / `Ya2.mp3`、`D1.mp3` / `D2.mp3` | 内置音效（按压 / 松开）。 |
 | `minecraft-exp-orb.wav`、`task-end-a.wav` | 内置任务结束音（Minecraft·经验球 / 预设 A）。 |
+| `DSniang1.png` / `DSniang02.png`（**本 fork 已替换，custom-pet**） | **fork 维护者（qwplsm-byte）自行提供的 AI 生成图像**（Gemini 生成，自有素材，非上游原版鲸鱼形象）。原文件为本图像经抠图处理（去黑底、去内嵌静态气泡、裁切至角色主体）后的透明底 PNG，块序列仅含 `IHDR` / `IDAT` / `IEND`；上游原版形象自 custom-pet 起不再随本 fork 分发。 |
 
 ## 三、元数据清理
 
