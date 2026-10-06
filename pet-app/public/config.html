@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>dsh-pet 设置</title>
+<style>
+  body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; background: #f4f6fb; color: #203170;
+         display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+  .card { background: #fff; border: 1px solid rgba(32,49,112,.15); border-radius: 12px; padding: 28px 32px; width: 420px; }
+  h1 { font-size: 18px; margin: 0 0 6px; }
+  p.tip { font-size: 12px; color: #7a86a8; margin: 0 0 18px; }
+  label { display: block; font-size: 13px; font-weight: 600; margin: 14px 0 6px; }
+  input[type=password], input[type=text] { width: 100%; box-sizing: border-box; padding: 8px 10px;
+    border: 1px solid rgba(32,49,112,.3); border-radius: 8px; font-size: 13px; }
+  .row { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-size: 13px; }
+  button { margin-top: 20px; width: 100%; padding: 10px; border: 0; border-radius: 8px;
+    background: #3b5bdb; color: #fff; font-size: 14px; cursor: pointer; }
+  button:hover { background: #364fc7; }
+  #msg { margin-top: 12px; font-size: 13px; text-align: center; color: #2f9e44; min-height: 18px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>dsh-pet 桌面宠物设置</h1>
+  <p class="tip">API Key 只保存在本机 pet-app 目录的 config.json，不经过任何第三方。留空且不开演示模式时，泡泡会提示未配置。</p>
+  <label>DeepSeek API Key</label>
+  <input type="password" id="key" placeholder="sk-...">
+  <div class="row">
+    <input type="checkbox" id="demo">
+    <span>演示模式（不调接口，固定显示 366.64 CNY）</span>
+  </div>
+  <button id="save">保存</button>
+  <div id="msg"></div>
+</div>
+<script>
+fetch('/dsh-whale/size.json').catch(function(){})
+fetch('/pet-config.json').then(function (r) { return r.json() }).then(function (d) {
+  document.getElementById('key').value = d.apiKey || ''
+  document.getElementById('demo').checked = d.demo === true
+}).catch(function () {})
+document.getElementById('save').onclick = function () {
+  fetch('/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ apiKey: document.getElementById('key').value, demo: document.getElementById('demo').checked })
+  }).then(function (r) { return r.json() }).then(function (d) {
+    document.getElementById('msg').textContent = d.ok ? '已保存，挂件将在一分钟内刷新余额' : '保存失败'
+  }).catch(function () { document.getElementById('msg').textContent = '保存失败' })
+}
+</script>
+</body>
+</html>

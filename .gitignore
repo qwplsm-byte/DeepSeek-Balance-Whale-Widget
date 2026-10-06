@@ -27,3 +27,6 @@ node_modules/
 *.bak2
 *.bak-devpaths
 _patch_*.patch
+
+# pet-app（独立桌面宠物）
+pet-app/node_modules/

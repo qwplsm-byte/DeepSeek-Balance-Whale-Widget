@@ -1,0 +1,18 @@
+{
+  "demo": true,
+  "widget": {
+    "scale": 1.5,
+    "sound": true,
+    "vol": 0.9,
+    "soundSet": "duck",
+    "usageMode": "ledger",
+    "peakMode": "default",
+    "bubbleOn": true,
+    "turnCostOn": true,
+    "turnCostCloseMs": 5000,
+    "scrollGapOn": false,
+    "scrollGapPx": 17,
+    "menuBtnHide": false,
+    "codexStatsOn": true
+  }
+}

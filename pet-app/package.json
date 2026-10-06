@@ -1,0 +1,13 @@
+{
+  "name": "dsh-pet-desktop",
+  "version": "0.1.0",
+  "description": "dsh-whale-widget 桌面宠物版：Electron 透明置顶窗口承载余额挂件（custom-pet 形象）",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}
