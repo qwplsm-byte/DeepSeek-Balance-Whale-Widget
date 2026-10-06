@@ -395,11 +395,13 @@ curl http://127.0.0.1:3080/dsh-whale/audio.json
 - `/dsh-whale/audio.json` → 200，含 `groups` / `fragments`（其中内置片段 `exp_orb` = Minecraft·经验球、`end_a` = A）
 - `/dsh-whale/audio-fragment.wav?id=exp_orb` → 200 `audio/wav`（内置任务结束音；无需用户导入）
 - `/dsh-whale/audio-fragment.wav?id=end_a` → 200 `audio/wav`（内置任务结束音 A）
+- `/dsh-whale/mood.json` → 独立桌宠的情绪系统；DSH 插件端返回 `{state:'normal'}` 占位（插件端不做情绪）
+- `/dsh-whale/mood-image.png` → 情绪角色图；DSH 插件端回退为当前角色图
 - `/dsh-whale/role-current.json` → `PUT` 返回 **204**（fork 的独立桌宠 `pet-app` 用它上报当前角色；DSH 插件端不保存，只保证路由存在、不再是 404）
 - `/dsh-whale/wait.json` → 200 JSON，含 `{ok:true, pending}`；`pending` 为当前挂起的「提问 / 授权」（`{kind:'question'|'approval', id, ts}`）或 `null` —— 这是「提问提示 / 授权提示」音效与常驻气泡的数据源（默认每秒轮询一次）
 - 浏览器 F5 后右下角出现挂件
 
-> ⚠️ **关于上面这些 `curl`**：全部 **24 个** `/dsh-whale/*` 路由都已接入 **DSH 浏览器信任栅栏**（`connection.requestRejection`）。
+> ⚠️ **关于上面这些 `curl`**：全部 **26 个** `/dsh-whale/*` 路由都已接入 **DSH 浏览器信任栅栏**（`connection.requestRejection`）。
 > 因此**不带会话凭据的裸 `curl` 会返回 401**（伪造 `Host` 头则是 403）—— 这是预期行为，不是接口坏了。
 > 想验证接口是否存活，看返回 **401/403** 即说明路由已注册且栅栏在工作；在浏览器里访问同一条路径（带会话）才是 200。
 > 另外**自 0.3.15 起，写请求（`POST`/`PUT`/`PATCH`/`DELETE`）还必须是本机来源**（Host 为 `127.0.0.1`/`localhost`/`[::1]`），否则 403 —— 详见上方「安全边界」。

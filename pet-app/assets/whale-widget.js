@@ -15045,6 +15045,65 @@ function usageRecDefaultText() {
 function usageRecRefresh() {
   try { if (!usagePanelOpen && usageRecBtn) usageRecBtn.textContent = usageRecDefaultText() } catch (err) {}
 }
+
+// ===== custom-pet：情绪系统（前端半区）=====
+// 计数与判定在宿主（pet-app/server.js 的 recordMoodClick），前端只负责：
+//   ① 每次「真点击」上报一次（拖拽不算 —— 能走到上报点本来就已过 drag.moved 判定）
+//   ② 按宿主返回的情绪切换角色图（生气 → /dsh-whale/mood-image.png）
+//   ③ 每 20 秒对一次表，消气后自动换回待机图
+// 为什么把计数放宿主：情绪要能"重启后继续生气"，必须落 config.json；前端只管上报。
+var MOOD_URL = '/dsh-whale/mood.json'
+var MOOD_IMG_URL = '/dsh-whale/mood-image.png'
+var moodState = 'normal'     // normal | angry
+var moodLevel = 0
+var moodPollTimer = null
+
+function applyRoleImage() {
+  // 生气时用生气素材；否则用当前角色图。加 ?v= 破浏览器缓存（宿主已 no-store，这里是双保险）。
+  var url = currentRole && currentRole.url ? currentRole.url : IMG_URL
+  if (moodState === 'angry') url = MOOD_IMG_URL + '?v=' + Date.now()
+  try { img.src = url } catch (err) {}
+}
+
+function setMood(state, level) {
+  var changed = (state !== moodState) || (level !== moodLevel)
+  moodState = state
+  moodLevel = level || 0
+  if (changed) {
+    applyRoleImage()
+    hitReady = false
+    hitFailed = false
+    try { setupHitTest(img.src) } catch (err) {}
+    // 情绪变化后立刻换泡泡队列：
+    //  · 刚生气 → 拉回生气台词池（宿主 /bubble.json 按情绪下发 source:'angry'）
+    //  · 刚消气 → 换回正常队列
+    // 若泡泡正显示着，先收起，避免旧文案停在屏幕上；下次点击即用新队列。
+    try { refreshBubbleCfgFromHost(function () {}) } catch (err) {}
+    try { if (bubbleShown) hideBubble() } catch (err) {}
+  }
+  return changed
+}
+
+// click=true 记一次点击（可能因此生气）；false 只读当前情绪
+function moodReport(click) {
+  try {
+    fetch(MOOD_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ click: click === true }),
+    })
+      .then(function (r) { return r.json() })
+      .then(function (d) { if (d && d.ok === true) setMood(d.state, d.level) })
+      .catch(function () {})
+  } catch (err) {}
+}
+function moodSync() { moodReport(false) }
+function moodStartPoll() {
+  try {
+    if (moodPollTimer) return
+    moodPollTimer = setInterval(moodSync, 20000)
+  } catch (err) {}
+}
 function setAudioBtnText(t) { try { audioGroupBtnLabel.textContent = t } catch (err) {} }
 // 名称悬停循环滚动：仅当文本溢出容器时，悬停到该行后名称无限循环滚动露出全名，
 // 移开停止并回位。双副本无缝循环：滚动距离 = 单份文本+间距，跳回起点时画面相同。
@@ -15133,7 +15192,6 @@ function makeNameCell(className, text) {
 }
 function applyRole(id, name, url) {
   currentRole = { id: id, name: name, url: url }
-  img.src = url
   setRoleBtnText(name)
   try { localStorage.setItem('dshw-role', id) } catch (err) {}
   // custom-pet：告知宿主当前角色（独立宠物端按角色切换额度口径/泡泡/记账文案；DSH 端 404 静默忽略）。
@@ -15147,10 +15205,12 @@ function applyRole(id, name, url) {
         try { refresh(false) } catch (err) {}
       })
   } catch (err) {}
+  // 角色图由 applyRoleImage() 统一决定：生气时显示生气素材，其余显示当前角色图
+  applyRoleImage()
   usageRecRefresh()
   hitReady = false
   hitFailed = false
-  setupHitTest(url)
+  setupHitTest(img.src)
   closeRolePanel()
   renderRolePanel()
 }
@@ -16996,6 +17056,8 @@ function endDrag(e, clickAllowed, cancelled) {
   if (clickAllowed && !drag.moved) {
     // 长按刚唤出菜单:这次抬手不再当作点击(避免顺带弹出余额泡)
     if (longPressRecent()) return
+    // custom-pet：只把「真点击」上报给宿主计数（拖拽在上面已排除，长按唤菜单在上面已 return）
+    try { moodReport(true) } catch (err) {}
     whaleClick()
     refresh(true)
     return
@@ -17086,6 +17148,8 @@ render()
 applySoundSet()
 setupHitTest(initRoleUrl)
 loadRoles()
+// custom-pet：情绪系统启动 —— 先对一次表（重启后若还在生气，立刻换成生气素材），再开轮询
+try { moodSync(); moodStartPoll() } catch (err) {}
 loadAudio()
 // 用量设置(任务结束音/预警/预算)加载,并据此初始化主菜单“任务结束”行
 loadUsageSettings(function () {

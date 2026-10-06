@@ -21,7 +21,89 @@ const BACKUP_VERSION = 1
 
 // 允许写入 / 导出 / 导入的配置键（白名单）。config.json 是用户本机文件，
 // 不接受任意字段进来；新增字段时必须同时登记在这里，否则导出/导入会漏掉它。
-const CONFIG_KEYS = ['demo', 'dsKey', 'dsMode', 'role', 'autostart', 'widget', 'bubbleGpt', 'bubbleWhale']
+const CONFIG_KEYS = ['demo', 'dsKey', 'dsMode', 'role', 'autostart', 'widget', 'bubbleGpt', 'bubbleWhale', 'mood']
+
+// —— 情绪系统（已实现：点太频繁会生气，生气期间只回生气台词）——
+// 规则（用户 2026-10-07 定稿）：
+//   · 统计**滚动 1 分钟**内的「真点击」次数（拖拽不算，判定在前端）
+//   · 25–34 次 → 1 档，气 1 分钟
+//   · 35–49 次 → 2 档，气 3 分钟
+//   · ≥50 次  → 3 档，气 5 分钟（封顶）
+//   · 生气期间点角色仍有反应，但只回生气台词（见 presets/bubbles.json 的 gptAngry）
+// 持久化：config.json 的 mood = { state, until, level }
+//   until 用**绝对时间戳**而不是剩余秒数 —— 重启/关机再开都能正确续算，
+//   不会因为重启白送一次时长。只在情绪变化时写盘，不是每次点击都写。
+const MOOD_WINDOW_MS = 60 * 1000
+const MOOD_TIERS = [
+  { min: 50, level: 3, durationMs: 5 * 60 * 1000 },
+  { min: 35, level: 2, durationMs: 3 * 60 * 1000 },
+  { min: 25, level: 1, durationMs: 1 * 60 * 1000 },
+]
+
+function moodTierFor(count) {
+  for (const t of MOOD_TIERS) {
+    if (count >= t.min) return t
+  }
+  return null
+}
+
+/** 读当前情绪；已到期则返回 normal（不写盘，写盘交给调用方决定）。 */
+function currentMood() {
+  const m = readConfig().mood
+  if (!m || m.state !== 'angry') return { state: 'normal', level: 0, until: 0, remainingMs: 0 }
+  const until = Number(m.until) || 0
+  const remainingMs = until - Date.now()
+  if (remainingMs <= 0) return { state: 'normal', level: 0, until: 0, remainingMs: 0, expired: true }
+  return { state: 'angry', level: Number(m.level) || 1, until, remainingMs }
+}
+
+// 点击时刻缓冲：**只留内存、不落盘**。若每次点击都写 config.json，25 次点击就是 25 次
+// 磁盘写入；而且这个缓冲是"最近 1 分钟"的短时状态，重启后重新计数是合理的。
+let moodClicks = []
+
+/** 记一次点击，必要时升级情绪。返回当前情绪快照。 */
+function recordMoodClick() {
+  const now = Date.now()
+  moodClicks = moodClicks.filter((t) => now - t < MOOD_WINDOW_MS)
+  moodClicks.push(now)
+
+  const cur = currentMood()
+  const tier = moodTierFor(moodClicks.length)
+
+  if (cur.state === 'angry') {
+    // 已经生气：继续点不延长时长（已定稿口径）。
+    // 但档位可以**升高** —— 否则"越点越气"永远到不了 2/3 档：
+    // 25 次触发 1 档后若把计数清零，下一个 35 次窗口又要重新数，中间必然先撞 25 再触发，
+    // 永远停在 1 档（实测踩过）。所以保留缓冲，并在档位升高时换更长的时长。
+    if (tier && tier.level > cur.level) {
+      const until = now + tier.durationMs
+      writeConfig({ mood: { state: 'angry', until, level: tier.level } })
+      console.log('[dsh-pet] 情绪升档：1 分钟内点击 ' + moodClicks.length + ' 次 → 生气 ' +
+        tier.level + ' 档，持续 ' + Math.round(tier.durationMs / 1000) + ' 秒')
+      return currentMood()
+    }
+    return cur
+  }
+
+  if (!tier) return cur
+
+  const until = now + tier.durationMs
+  writeConfig({ mood: { state: 'angry', until, level: tier.level } })
+  console.log('[dsh-pet] 情绪升级：1 分钟内点击 ' + moodClicks.length + ' 次 → 生气 ' + tier.level +
+    ' 档，持续 ' + Math.round(tier.durationMs / 1000) + ' 秒')
+  return currentMood()
+}
+
+/** 到期则清掉情绪（返回是否发生了状态变化，用于决定要不要走写盘）。 */
+function expireMoodIfNeeded() {
+  const m = currentMood()
+  if (m.expired) {
+    writeConfig({ mood: { state: 'normal', until: 0, level: 0 } })
+    console.log('[dsh-pet] 情绪已消气，回到 normal')
+    return true
+  }
+  return false
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -278,9 +360,41 @@ const BUBBLES_PRESET = loadPreset('bubbles.json', {})
 const WHALE_DEFAULT_PRESET = loadPreset('bubble-default-whale.json', null)
 
 function emptyQueue() { return { v: 1, tapAdvance: true, lib: [], items: [] } }
+
+/**
+ * 生气台词泡泡：按档位取 presets/bubbles.json 的 gptAngry[level]。
+ * 生气期间点角色仍有反应（不装死），但只回这些台词，不再走正常的余额/额度队列。
+ */
+function angryQueue(level) {
+  const pool = (BUBBLES_PRESET.gptAngry || {})[String(level)] || (BUBBLES_PRESET.gptAngry || {})['1']
+  if (!Array.isArray(pool) || !pool.length) return null
+  return {
+    v: 1,
+    tapAdvance: false,
+    lib: [],
+    items: [
+      {
+        kind: 'custom',
+        modules: [
+          {
+            type: 'random',
+            lines: pool.map((l) => ({ t: l.t, w: Number(l.w) || 8, bold: true, size: 11 })),
+          },
+        ],
+      },
+    ],
+  }
+}
+
 function bubblePayload() {
   const role = currentRoleId()
   const cfg = readConfig()
+  // 生气优先：任何角色在生气期间都只回生气台词
+  const mood = currentMood()
+  if (mood.state === 'angry') {
+    const q = angryQueue(mood.level)
+    if (q) return { ok: true, source: 'angry', config: q, mood }
+  }
   if (role === DEEPSEEK_ROLE_ID) {
     if (cfg.bubbleWhale) return { ok: true, source: 'stored', config: cfg.bubbleWhale }
     const official = WHALE_DEFAULT_PRESET && Array.isArray(WHALE_DEFAULT_PRESET.items) ? WHALE_DEFAULT_PRESET.items : null
@@ -397,6 +511,8 @@ function handle(req, res) {
         if (k === 'role' && !PRESET_ROLES.some((r) => r.id === src[k])) continue
         if ((k === 'widget' || k === 'bubbleGpt' || k === 'bubbleWhale') &&
           (!src[k] || typeof src[k] !== 'object' || Array.isArray(src[k]))) continue
+        // mood 也允许随备份走：换机后"继续生气"能还原（until 是绝对时间戳，过期即自动消气）
+        if (k === 'mood' && (!src[k] || typeof src[k] !== 'object' || Array.isArray(src[k]))) continue
         patch[k] = src[k]
         applied.push(k)
       }
@@ -422,6 +538,41 @@ function handle(req, res) {
     return hit ? sendFile(res, hit) : send(res, 404, 'image missing')
   }
   if (p === '/dsh-whale/rua.gif') return sendFile(res, path.join(ASSETS, 'rua.gif'))
+
+  // —— 情绪系统 ——
+  // GET  /dsh-whale/mood.json       读当前情绪（前端初始化/消气判断）
+  // POST /dsh-whale/mood.json       记一次点击 {"click":true}；越阈值则升级并在响应里告知
+  // GET  /dsh-whale/mood-image.png  当前情绪对应的角色图（生气 → angry.png，其余 → 角色图）
+  if (p === '/dsh-whale/mood.json') {
+    if (req.method === 'POST') {
+      return readBody(req, (body) => {
+        let click = false
+        try { click = JSON.parse(body || '{}').click === true } catch (err) {}
+        const mood = click ? recordMoodClick() : currentMood()
+        send(res, 200, JSON.stringify(Object.assign({ ok: true }, mood, {
+          clicks: moodClicks.length,
+          tier: moodTierFor(moodClicks.length) ? moodTierFor(moodClicks.length).min : 0,
+        })), MIME['.json'])
+      })
+    }
+    expireMoodIfNeeded()
+    return send(res, 200, JSON.stringify(Object.assign({ ok: true }, currentMood(), {
+      clicks: moodClicks.length,
+      thresholds: MOOD_TIERS.map((t) => t.min),
+    })), MIME['.json'])
+  }
+  if (p === '/dsh-whale/mood-image.png') {
+    const mood = currentMood()
+    if (mood.state === 'angry') {
+      const f = path.join(ASSETS, 'mood', 'angry.png')
+      if (fs.existsSync(f)) return sendFile(res, f)
+    }
+    const def = PRESET_ROLES.find((r) => r.id === DEFAULT_ROLE_ID) || PRESET_ROLES[0]
+    const candidates = [def && def.image, 'DSniang1.png', 'DSniang02.png'].filter(Boolean)
+    const hit = candidates.map((f) => path.join(ASSETS, String(f))).find((f) => fs.existsSync(f))
+    return hit ? sendFile(res, hit) : send(res, 404, 'image missing')
+  }
+
   if (p === '/dsh-whale/balance.json') {
     // 额度口径随角色：gpt娘 → Codex 订阅窗口（主窗口剩余%，currency='%'）；
     // 小鲸鱼 → DeepSeek 账户余额（dsMode：total=账户总额 / topup=仅充值）
@@ -574,6 +725,15 @@ module.exports = {
   onConfigChanged,
   CONFIG_PATH: CONFIG_FILE,
   PRESET_ROLES,
+  // 情绪系统：供 tools/smoke-pet.mjs 等测试读取/重置。
+  // resetMoodState() 只清「1 分钟点击缓冲」这个纯内存状态与配置里的 mood，不碰其它设置。
+  currentMood,
+  resetMoodState() {
+    moodClicks = []
+    writeConfig({ mood: { state: 'normal', until: 0, level: 0 } })
+    return currentMood()
+  },
+  MOOD_TIERS,
 }
 
 if (require.main === module) {
