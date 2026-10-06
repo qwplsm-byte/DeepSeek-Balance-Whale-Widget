@@ -12,14 +12,14 @@ let tray = null
 let port = 0
 
 function createWindow() {
+  // 全工作区透明窗：挂件在页面内可拖到屏幕任何角落（挂件自己的拖动就是在视口内移动）。
+  // 透明区鼠标穿透由 preload 上报 + setIgnoreMouseEvents 处理，不会挡住桌面。
   const wa = screen.getPrimaryDisplay().workArea
-  const width = 520
-  const height = 600
   win = new BrowserWindow({
-    width,
-    height,
-    x: wa.x + wa.width - width - 8,
-    y: wa.y + wa.height - height - 8,
+    x: wa.x,
+    y: wa.y,
+    width: wa.width,
+    height: wa.height,
     transparent: true,
     frame: false,
     resizable: false,

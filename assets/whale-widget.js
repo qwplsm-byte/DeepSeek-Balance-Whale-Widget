@@ -1681,7 +1681,7 @@ roleBtn.className = 'dshwv-rolebtn'
 roleBtn.title = '选择角色'
 var roleBtnLabel = document.createElement('span')
 roleBtnLabel.className = 'dshwv-btnlabel'
-roleBtnLabel.textContent = '小鲸鱼'
+roleBtnLabel.textContent = 'gpt娘'
 roleBtn.appendChild(roleBtnLabel)
 var rolePanel = document.createElement('div')
 rolePanel.className = 'dshwv-rolelist'
