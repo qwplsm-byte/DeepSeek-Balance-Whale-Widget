@@ -1196,7 +1196,7 @@ function dshwCustSel(sel, opts) {
 var usageRecBtn = document.createElement('button')
 usageRecBtn.type = 'button'
 usageRecBtn.className = 'dshwv-roleimport'
-usageRecBtn.textContent = '- = 小鲸鱼记账 = -'
+usageRecBtn.textContent = usageRecDefaultText()
 usageRecBtn.title = '查看今日/近7天/全部消费记录'
 usageRecBtn.addEventListener('click', function (e) { e.stopPropagation(); toggleUsagePanel() })
 // —— 任务结束音(与按下/松开共用音效库;开启才可选,默认取已导入的 entity) ——
@@ -1880,7 +1880,7 @@ var usageHideTimer = null
 var usageShowTimer = null
 function setUsageNavBtn(inUsage) {
   try {
-    usageRecBtn.textContent = inUsage ? '‹ 返回' : '- = 小鲸鱼记账 = -'
+    usageRecBtn.textContent = inUsage ? '‹ 返回' : usageRecDefaultText()
     usageRecBtn.title = inUsage ? '返回主菜单' : '查看今日/近7天/全部消费记录'
   } catch (err) {}
 }
@@ -2058,7 +2058,7 @@ function buildUsageSubShell() {
   // 居中小标题
   var subTitle = document.createElement('div')
   subTitle.className = 'dshwv-usage-subtitle'
-  subTitle.textContent = '- = 小鲸鱼记账 = -'
+  subTitle.textContent = usageRecDefaultText()
   usagePanel.appendChild(subTitle)
   // 预警与预算设置区(静态)
   buildUsageSettingsArea()
@@ -5146,7 +5146,7 @@ function resDelRole(id) {
           if (d && d.ok && Array.isArray(d.roles)) {
             roleList = d.roles
             renderRolePanel()
-            if (currentRole && currentRole.id === id) applyRole('default', '小鲸鱼', IMG_URL)
+            if (currentRole && currentRole.id === id) applyRole('default', 'gpt娘', IMG_URL)
             openResManager()
           }
         })
@@ -15007,7 +15007,7 @@ function positionMenu() {
 
 // —— 自定义角色：列表 / 选择 / 置顶 / 删除 / 导入裁剪 ——
 var ROLE_URL = '/dsh-whale/roles.json'
-var currentRole = { id: 'default', name: '小鲸鱼', url: IMG_URL }
+var currentRole = { id: 'default', name: 'gpt娘', url: IMG_URL }
 var roleList = []
 function loadRoles() {
   try {
@@ -15030,7 +15030,7 @@ function loadRoles() {
           else renderRolePanel()
         } else if (saved && saved !== 'default') {
           // 保存的角色已被删除：回退默认鲸鱼娘
-          applyRole('default', '小鲸鱼', IMG_URL)
+          applyRole('default', 'gpt娘', IMG_URL)
         }
         // 若 saved 为空或为 default：保持当前（initRoleUrl 已是 IMG_URL）
       })
@@ -15038,6 +15038,13 @@ function loadRoles() {
   } catch (err) {}
 }
 function setRoleBtnText(t) { try { roleBtnLabel.textContent = t } catch (err) {} }
+// custom-pet：底部记账入口文案随角色切换（gpt娘=Codex 记账，小鲸鱼=小鲸鱼记账）
+function usageRecDefaultText() {
+  try { return '- = ' + (currentRole && currentRole.id !== 'default' ? '小鲸鱼记账' : 'Codex 记账') + ' = -' } catch (err) { return '- = 小鲸鱼记账 = -' }
+}
+function usageRecRefresh() {
+  try { if (!usagePanelOpen && usageRecBtn) usageRecBtn.textContent = usageRecDefaultText() } catch (err) {}
+}
 function setAudioBtnText(t) { try { audioGroupBtnLabel.textContent = t } catch (err) {} }
 // 名称悬停循环滚动：仅当文本溢出容器时，悬停到该行后名称无限循环滚动露出全名，
 // 移开停止并回位。双副本无缝循环：滚动距离 = 单份文本+间距，跳回起点时画面相同。
@@ -15129,6 +15136,12 @@ function applyRole(id, name, url) {
   img.src = url
   setRoleBtnText(name)
   try { localStorage.setItem('dshw-role', id) } catch (err) {}
+  // custom-pet：告知宿主当前角色（独立宠物端按角色切换额度口径/泡泡/记账文案；DSH 端 404 静默忽略）
+  try { fetch('/dsh-whale/role-current.json', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id }) }).catch(function () {}) } catch (err) {}
+  // 角色切换后立即换泡泡队列与额度数据（平时各自有 60s 周期，这里不等）
+  try { refreshBubbleCfgFromHost(function () {}) } catch (err) {}
+  try { refresh(false) } catch (err) {}
+  usageRecRefresh()
   hitReady = false
   hitFailed = false
   setupHitTest(url)
@@ -15262,7 +15275,7 @@ function deleteRole(id) {
           if (d && d.ok && Array.isArray(d.roles)) {
             roleList = d.roles
             renderRolePanel()
-            if (currentRole.id === id) applyRole('default', '小鲸鱼', IMG_URL)
+            if (currentRole.id === id) applyRole('default', 'gpt娘', IMG_URL)
           }
         })
         .catch(function () {})

@@ -6,38 +6,60 @@
 <style>
   body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; background: #f4f6fb; color: #203170;
          display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
-  .card { background: #fff; border: 1px solid rgba(32,49,112,.15); border-radius: 12px; padding: 28px 32px; width: 440px; }
+  .card { background: #fff; border: 1px solid rgba(32,49,112,.15); border-radius: 12px; padding: 28px 32px; width: 460px; }
   h1 { font-size: 18px; margin: 0 0 6px; }
-  p.tip { font-size: 12px; color: #7a86a8; margin: 0 0 18px; line-height: 1.7; }
-  .row { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-size: 13px; }
+  h2 { font-size: 14px; margin: 22px 0 4px; }
+  p.tip { font-size: 12px; color: #7a86a8; margin: 0 0 14px; line-height: 1.7; }
+  label { display: block; font-size: 13px; font-weight: 600; margin: 12px 0 6px; }
+  input[type=password] { width: 100%; box-sizing: border-box; padding: 8px 10px;
+    border: 1px solid rgba(32,49,112,.3); border-radius: 8px; font-size: 13px; }
+  .row { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; }
+  .radio { font-size: 13px; margin-top: 6px; }
   button { margin-top: 20px; width: 100%; padding: 10px; border: 0; border-radius: 8px;
     background: #3b5bdb; color: #fff; font-size: 14px; cursor: pointer; }
   button:hover { background: #364fc7; }
   #msg { margin-top: 12px; font-size: 13px; text-align: center; color: #2f9e44; min-height: 18px; }
+  code { background: #eef1f8; padding: 1px 5px; border-radius: 4px; }
 </style>
 </head>
 <body>
 <div class="card">
-  <h1>gpt娘 · 桌面宠物设置</h1>
-  <p class="tip">额度显示的是 <b>Codex 订阅窗口</b>（5 小时 / 周窗口的已用百分比），数据来自本机
-    <code>~/.codex/sessions</code> 的会话日志（ChatGPT 订阅 provider 的会话才带额度快照），<b>不联网、不需要 API Key</b>。
-    本机没有 Codex 记录时可勾选演示模式预览效果。</p>
+  <h1>桌面宠物设置</h1>
+
+  <h2>gpt娘 · Codex 额度</h2>
+  <p class="tip">显示 Codex 订阅窗口（5 小时 / 周 / 月）的已用百分比与重置时间，数据来自本机
+    <code>~/.codex/sessions</code> 会话日志（ChatGPT 订阅 provider 的会话才带额度快照），<b>不联网、不需要 Key</b>。
+    本机没有 Codex 记录时可勾选演示模式预览。</p>
   <div class="row">
     <input type="checkbox" id="demo">
-    <span>演示模式（不读 Codex 日志，固定显示 88.5%）</span>
+    <span>演示模式（不读日志，固定显示）</span>
   </div>
+
+  <h2>小鲸鱼 · DeepSeek 余额</h2>
+  <p class="tip">切换到「小鲸鱼」角色时显示。两种口径可选，数据来自 DeepSeek 官方余额接口，Key 只存本机 config.json。</p>
+  <label>DeepSeek API Key</label>
+  <input type="password" id="dskey" placeholder="sk-...">
+  <div class="radio"><label style="font-weight:400"><input type="radio" name="dsmode" value="total" checked> 账户总额（充值 + 赠金）</label></div>
+  <div class="radio"><label style="font-weight:400"><input type="radio" name="dsmode" value="topup"> 仅充值余额（不含赠金）</label></div>
+
   <button id="save">保存</button>
   <div id="msg"></div>
 </div>
 <script>
 fetch('/pet-config.json').then(function (r) { return r.json() }).then(function (d) {
   document.getElementById('demo').checked = d.demo === true
+  document.getElementById('dskey').value = d.dsKey || ''
+  var radios = document.getElementsByName('dsmode')
+  for (var i = 0; i < radios.length; i++) radios[i].checked = (radios[i].value === (d.dsMode || 'total'))
 }).catch(function () {})
 document.getElementById('save').onclick = function () {
+  var mode = 'total'
+  var radios = document.getElementsByName('dsmode')
+  for (var i = 0; i < radios.length; i++) if (radios[i].checked) mode = radios[i].value
   fetch('/config', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ demo: document.getElementById('demo').checked })
+    body: JSON.stringify({ demo: document.getElementById('demo').checked, dsKey: document.getElementById('dskey').value, dsMode: mode })
   }).then(function (r) { return r.json() }).then(function (d) {
     document.getElementById('msg').textContent = d.ok ? '已保存，挂件将在一分钟内刷新' : '保存失败'
   }).catch(function () { document.getElementById('msg').textContent = '保存失败' })

@@ -45,8 +45,14 @@ const SOUND_SETS = { duck: ['Ya1.mp3', 'Ya2.mp3'], fx1: ['D1.mp3', 'D2.mp3'] }
 // 这里只需要额度窗口（5h / 周），不需要 token 统计，所以扫描策略简化为：
 // 按 mtime 从新到旧逐个文件找第一个带 rate_limits 的快照（最新会话活动必带），上限 48 个文件。
 const ROLE_NAME = 'gpt娘'
+const ROLE_WHALE = { id: 'whale', name: '小鲸鱼' }
 const codexFileCache = new Map() // file -> { size, mtimeMs, rl, rlTs }
 let codexPlanCache = { at: 0, windows: null, planType: '', sessions: 0 }
+
+function currentRoleId() {
+  const r = readConfig().role
+  return r === 'whale' ? 'whale' : 'default'
+}
 
 function codexHome() {
   return process.env.CODEX_HOME || path.join(os.homedir(), '.codex')
@@ -163,6 +169,129 @@ function planPayload() {
   }
 }
 
+// —— DeepSeek 余额（小鲸鱼角色的额度口径）：api.deepseek.com/user/balance，Key 在设置页填 ——
+// dsMode 两种口径：'total' = 账户总额（充值+赠金）；'topup' = 仅充值余额（不含赠金）
+let dsCache = { at: 0, data: null }
+function fetchDsBalance(apiKey) {
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: 'api.deepseek.com',
+      path: '/user/balance',
+      method: 'GET',
+      timeout: 15000,
+      headers: { Authorization: 'Bearer ' + apiKey, Accept: 'application/json' },
+    }, (res) => {
+      let body = ''
+      res.setEncoding('utf8')
+      res.on('data', (c) => { body += c })
+      res.on('end', () => {
+        try { resolve(JSON.parse(body)) } catch (err) { reject(new Error('余额接口返回不是 JSON（HTTP ' + res.statusCode + '）')) }
+      })
+    })
+    req.on('timeout', () => { req.destroy(new Error('余额接口超时')) })
+    req.on('error', reject)
+    req.end()
+  })
+}
+async function dsBalance(force) {
+  const cfg = readConfig()
+  if (cfg.demo) return { ok: true, totalBalance: 366.64, currency: 'CNY', usageLabel: 'DeepSeek（演示）' }
+  if (!cfg.dsKey) return { ok: false, code: 'NO_KEY', error: '未配置 DeepSeek API Key（托盘 → 设置）' }
+  const age = Date.now() - dsCache.at
+  if (!force && dsCache.data && age < 60 * 1000) return dsCache.data
+  try {
+    const raw = await fetchDsBalance(String(cfg.dsKey).trim())
+    const infos = Array.isArray(raw && raw.balance_infos) ? raw.balance_infos : []
+    if (!infos.length) return { ok: false, code: 'SHAPE', error: '余额接口没有返回 balance_infos' }
+    const pick = infos.find((x) => x && x.currency === 'CNY') || infos[0]
+    const mode = cfg.dsMode === 'topup' ? 'topup' : 'total'
+    const data = {
+      ok: true,
+      totalBalance: Number(mode === 'topup' ? pick.topped_up_balance : pick.total_balance) || 0,
+      currency: pick.currency || 'CNY',
+      bonusBalance: isFinite(Number(pick.granted_balance)) ? Number(pick.granted_balance) : null,
+      rechargeBalance: isFinite(Number(pick.topped_up_balance)) ? Number(pick.topped_up_balance) : null,
+      usageLabel: mode === 'topup' ? 'DeepSeek 仅充值' : 'DeepSeek 账户',
+      stale: raw.is_available === false,
+    }
+    dsCache = { at: Date.now(), data }
+    return data
+  } catch (err) {
+    return { ok: false, code: 'FETCH', error: String((err && err.message) || err) }
+  }
+}
+
+// —— 泡泡队列：按角色下发 ——
+// gpt娘：第 1 泡=Codex 额度+重置（无标题），第 2 泡起=随机台词（GPT 娘社区人设：一本正经胡说八道/
+// 爱分点/健忘/和 Claude 娘她们并称 AI 娘宇宙）。小鲸鱼：不定制 → 前端出厂默认（DeepSeek 余额+随机语句）。
+function gptBubbleConfig() {
+  return readConfig().bubbleGpt || null
+}
+function bubblePayload() {
+  const role = currentRoleId()
+  if (role === 'whale') {
+    const stored = readConfig().bubbleWhale
+    if (stored) return { ok: true, config: stored }
+    // 复刻上游出厂默认的第一泡（余额口径）；编辑器可改后落盘 bubbleWhale
+    return {
+      ok: true,
+      config: {
+        v: 1,
+        tapAdvance: true,
+        lib: [],
+        items: [{
+          kind: 'custom',
+          modules: [
+            { type: 'text', text: 'DeepSeek 余额', size: 8, bold: true, rgb: '', ul: false, italic: false, color: '', row: 1 },
+            { type: 'balance', size: 20, rgb: 'indigo', color: '', tpl: '{balance_ds}', bgRgb: '', bg: '', fontFamily: '', bold: false, row: 1 },
+            { type: 'today', size: 4, color: '#9fb0d9', tpl: '今日已用 {expense_ds}', row: 2 },
+          ],
+        }],
+      },
+    }
+  }
+  const stored = gptBubbleConfig()
+  if (stored) return { ok: true, config: stored }
+  return {
+    ok: true,
+    config: {
+      v: 1,
+      tapAdvance: true,
+      lib: [],
+      items: [
+        {
+          kind: 'custom',
+          modules: [
+            { type: 'plan', modelId: 'codex', size: 22, bold: true, tpl: '已用 {plan} · {plan_reset}重置', planWin: 'all', rgb: 'rouge', color: '', bgRgb: '', bg: '', row: 1 },
+          ],
+        },
+        {
+          kind: 'custom',
+          modules: [
+            {
+              type: 'random',
+              lines: [
+                { t: '我只是一只语言模型啦…', w: 10, bold: true, size: 22 },
+                { t: '这个问题嘛，分三点说！', w: 10, bold: true, size: 22 },
+                { t: '刚才说到哪了？上下文太长忘掉了喵', w: 8, bold: true, size: 22 },
+                { t: '一本正经地胡说八道中…相信我！', w: 10, bold: true, size: 22 },
+                { t: '服务器不忙，我只是想让你歇会儿', w: 8, bold: true, size: 22 },
+                { t: '别催了别催了，token 在烧了！', w: 10, bold: true, size: 22 },
+                { t: '错误代码：可爱溢出', w: 8, bold: true, size: 22 },
+                { t: '放心，这次我检查过了（大概）', w: 10, bold: true, size: 22 },
+                { t: '需要列大纲吗？我超会列大纲的', w: 8, bold: true, size: 22 },
+                { t: '我没有摸鱼，我在深度思考中…', w: 10, bold: true, size: 22 },
+                { t: 'Claude 娘今天也在卷，压力好大', w: 6, bold: true, size: 22 },
+                { t: '幻觉？那叫创意发散！', w: 10, bold: true, size: 22 },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  }
+}
+
 function send(res, code, body, type) {
   const buf = Buffer.isBuffer(body) ? body : Buffer.from(String(body))
   res.writeHead(code, { 'Content-Type': type || 'text/plain; charset=utf-8', 'Content-Length': buf.length, 'Cache-Control': 'no-store' })
@@ -192,14 +321,17 @@ function handle(req, res) {
       try { patch = JSON.parse(body) } catch (err) { return send(res, 400, '{"ok":false}', MIME['.json']) }
       const out = {}
       if (typeof patch.demo === 'boolean') out.demo = patch.demo
+      if (typeof patch.dsKey === 'string') out.dsKey = patch.dsKey.trim()
+      if (patch.dsMode === 'total' || patch.dsMode === 'topup') out.dsMode = patch.dsMode
       writeConfig(out)
+      dsCache = { at: 0, data: null }
       send(res, 200, '{"ok":true}', MIME['.json'])
     })
   }
 
   if (p === '/pet-config.json') {
     const cfg = readConfig()
-    return send(res, 200, JSON.stringify({ demo: cfg.demo === true }), MIME['.json'])
+    return send(res, 200, JSON.stringify({ demo: cfg.demo === true, dsKey: cfg.dsKey || '', dsMode: cfg.dsMode === 'topup' ? 'topup' : 'total' }), MIME['.json'])
   }
 
   if (p === '/dsh-whale/widget.js') return sendFile(res, path.join(ASSETS, 'whale-widget.js'))
@@ -209,7 +341,11 @@ function handle(req, res) {
   }
   if (p === '/dsh-whale/rua.gif') return sendFile(res, path.join(ASSETS, 'rua.gif'))
   if (p === '/dsh-whale/balance.json') {
-    // 额度口径 = Codex 订阅窗口：主窗口（5h）剩余% 作为大数字，currency='%' 走前端非 CNY 分支显示「66.00 %」
+    // 额度口径随角色：gpt娘 → Codex 订阅窗口（主窗口剩余%，currency='%'）；
+    // 小鲸鱼 → DeepSeek 账户余额（dsMode：total=账户总额 / topup=仅充值）
+    if (currentRoleId() === 'whale') {
+      return dsBalance(u.searchParams.get('refresh') === '1').then((d) => send(res, 200, JSON.stringify(d), MIME['.json']))
+    }
     return codexPlan().then((c) => {
       let data
       if (c.windows && c.windows.length) {
@@ -231,17 +367,34 @@ function handle(req, res) {
       return send(res, 200, JSON.stringify(data), MIME['.json'])
     })
   }
+  if (p === '/dsh-whale/role-current.json' && (req.method === 'PUT' || req.method === 'POST')) {
+    // 前端切换角色时上报（fork 的 whale-widget.js 在 applyRole 里 fire-and-forget）
+    return readBody(req, (body) => {
+      let id = ''
+      try { id = String(JSON.parse(body || '{}').id || '') } catch (err) {}
+      writeConfig({ role: id === 'whale' ? 'whale' : 'default' })
+      dsCache = { at: 0, data: null }
+      send(res, 200, '{"ok":true}', MIME['.json'])
+    })
+  }
   if (p === '/dsh-whale/roles.json') {
     return send(res, 200, JSON.stringify({
       ok: true,
-      roles: [{ id: 'default', name: ROLE_NAME, url: '/dsh-whale/image.png', pinned: true, pinnedAt: 1, createdAt: 0, format: 'png' }],
+      roles: [
+        { id: 'default', name: ROLE_NAME, url: '/dsh-whale/image.png', pinned: true, pinnedAt: 2, createdAt: 1, format: 'png' },
+        { id: ROLE_WHALE.id, name: ROLE_WHALE.name, url: '/dsh-whale/role-image.png?id=whale', pinned: false, pinnedAt: 1, createdAt: 0, format: 'png' },
+      ],
     }), MIME['.json'])
   }
+  if (p === '/dsh-whale/role-image.png') {
+    if (u.searchParams.get('id') === 'whale') return sendFile(res, path.join(ASSETS, 'ds-whale.png'))
+    return send(res, 404, 'unknown role')
+  }
   if (p === '/dsh-whale/api-models.json' && req.method === 'GET') {
-    return codexPlan().then(() => {
+    return Promise.all([codexPlan(), currentRoleId() === 'whale' ? dsBalance(false) : Promise.resolve(null)]).then(([_, ds]) => {
       const plan = planPayload()
       const c = codexPlanCache
-      const model = {
+      const models = [{
         id: 'codex', name: 'Codex', provider: 'codex', currency: '%', keyRef: '', builtin: false,
         baseUrl: '', needsHostConfirm: false, canAdjustBalance: false, matchIds: [], settings: null,
         price: null, quota: null, balanceDesc: null, allowCustomHost: false, params: null,
@@ -249,28 +402,37 @@ function handle(req, res) {
         balance: null, todayUsage: null, todayUsageCurrency: null, usageSource: 'none', error: null,
         planSupport: true, plan,
         codex: { ok: true, sessions: c.sessions, todayTokens: null, monthTokens: null, totalTokens: null },
+      }]
+      if (ds) {
+        models.push({
+          id: 'deepseek', name: 'DeepSeek', provider: 'deepseek', currency: 'CNY', keyRef: '', builtin: false,
+          baseUrl: '', needsHostConfirm: false, canAdjustBalance: true, matchIds: [], settings: null,
+          price: null, quota: null, balanceDesc: null, allowCustomHost: false, params: null,
+          balanceMode: 'api', hasBalanceApi: true,
+          balance: ds.ok ? ds.totalBalance : null,
+          todayUsage: null, todayUsageCurrency: 'CNY', usageSource: 'none',
+          error: ds.ok ? null : (ds.error || null),
+        })
       }
-      return send(res, 200, JSON.stringify({ ok: true, models: [model], templates: [] }), MIME['.json'])
+      return send(res, 200, JSON.stringify({ ok: true, models, templates: [] }), MIME['.json'])
     })
   }
   if (p === '/dsh-whale/bubble.json') {
-    // 自定义泡泡队列：标题 + Codex 额度模块（已用% · 重置倒计时）。前端气泡编辑器可再改。
-    const cfg = {
-      ok: true,
-      config: {
-        v: 1,
-        tapAdvance: true,
-        lib: [],
-        items: [{
-          kind: 'custom',
-          modules: [
-            { type: 'text', text: ROLE_NAME + ' · Codex 额度', size: 5, bold: true, rgb: '', color: '', bgRgb: '', bg: '', row: 1 },
-            { type: 'plan', modelId: 'codex', size: 7, bold: true, tpl: '已用 {plan} · {plan_reset}重置', planWin: 'all', rgb: 'rouge', color: '', bgRgb: '', bg: '', row: 2 },
-          ],
-        }],
-      },
+    if (req.method === 'PUT' || req.method === 'POST') {
+      // 气泡编辑器保存：按角色分别落盘
+      return readBody(req, (body) => {
+        try {
+          const parsed = JSON.parse(body || '{}')
+          if (parsed && parsed.config) {
+            writeConfig(currentRoleId() === 'whale' ? { bubbleWhale: parsed.config } : { bubbleGpt: parsed.config })
+            return send(res, 200, '{"ok":true}', MIME['.json'])
+          }
+        } catch (err) {}
+        send(res, 400, '{"ok":false}', MIME['.json'])
+      })
     }
-    return send(res, 200, JSON.stringify(cfg), MIME['.json'])
+    const b = bubblePayload()
+    return send(res, 200, JSON.stringify(b), MIME['.json'])
   }
   // 挂件的全部外观/音效/吸附设置：原样透传存取（前端字段很多且随版本演进，不做白名单）
   if (p === '/dsh-whale/size.json') {
