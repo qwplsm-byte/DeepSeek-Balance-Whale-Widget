@@ -145,13 +145,63 @@ function writeConfig(patch) {
 
 // 预设（单一来源）：读 pet-app/presets/*.json。读不到只降级不崩，但会打日志 ——
 // 静默降级正是这个 fork 之前最难查的一类问题（台词变少 / 角色消失都不报错）。
-function loadPreset(name, fallback) {
+//
+// ⭐ 预设**按需缓存 + 支持热重载**：原先是模块顶层的 const（启动读一次），
+//    改 presets/*.json 必须重启进程。现在改成带 mtime 的惰性读取，
+//    文件没变就命中缓存（不重复读盘），变了就自动重读 —— 配合 /dsh-whale/reload，
+//    改台词/角色/情绪素材都不再需要重启。
+const ROLES_FALLBACK = [{ id: 'default', name: 'gpt娘', image: 'DSniang1.png', route: '/dsh-whale/image.png' }]
+const presetCache = new Map() // name -> { mtimeMs, size, data }
+function loadPreset(name, fallback, opts) {
+  const force = !!(opts && opts.force)
+  const abs = path.join(PRESETS, name)
   try {
-    return JSON.parse(fs.readFileSync(path.join(PRESETS, name), 'utf8'))
+    const st = fs.statSync(abs)
+    const hit = presetCache.get(name)
+    if (!force && hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.data
+    const data = JSON.parse(fs.readFileSync(abs, 'utf8'))
+    presetCache.set(name, { mtimeMs: st.mtimeMs, size: st.size, data })
+    if (hit && force) console.log('[dsh-pet] 预设已重载：' + name)
+    return data
   } catch (err) {
+    // 读失败时：若缓存里有上一次成功的值就继续用（比降级到 fallback 更安全）
+    const hit = presetCache.get(name)
+    if (hit) {
+      console.warn('[dsh-pet] 预设 ' + name + ' 读取失败，沿用上一次成功的值：' + ((err && err.message) || err))
+      return hit.data
+    }
     console.warn('[dsh-pet] 预设 ' + name + ' 读取失败，使用内置降级值：' + ((err && err.message) || err))
     return fallback
   }
+}
+
+// 预设的"当前值"一律走这两个访问器（不要缓存成模块级常量，否则热重载失效）
+function presetRoles() {
+  const p = loadPreset('roles.json', { roles: ROLES_FALLBACK })
+  return Array.isArray(p.roles) && p.roles.length ? p.roles : ROLES_FALLBACK
+}
+function defaultRoleId() {
+  const rs = presetRoles()
+  return rs[0].id
+}
+function presetBubbles() { return loadPreset('bubbles.json', {}) }
+function presetWhaleDefaults() { return loadPreset('bubble-default-whale.json', null) }
+
+// 热重载：清缓存后强制重读全部预设（文件缺失/写坏时 loadPreset 会沿用上次成功的值）
+function clearPresetCache() { presetCache.clear() }
+function reloadPresets() {
+  clearPresetCache()
+  const names = ['roles.json', 'bubbles.json', 'bubble-default-whale.json']
+  const out = {}
+  for (const n of names) loadPreset(n, null, { force: true })
+  out.roles = presetRoles().length
+  out.bubbles = Object.keys(presetBubbles()).length
+  out.whaleItems = (presetWhaleDefaults() || {}).count || 0
+  console.log('[dsh-pet] 预设已热重载：角色 ' + out.roles + ' 个 / 泡泡池 ' + out.bubbles +
+    ' 组 / 上游默认台词 ' + out.whaleItems + ' 项')
+  // Codex 额度缓存也一并失效：改完预设/素材后重新探测一次，免得看到旧值
+  codexPlanCache = { at: 0, windows: null, planType: '', sessions: 0 }
+  return out
 }
 
 // —— 音效：预设组 duck → Ya1/Ya2，fx1 → D1/D2（与插件 assets 同源同名） ——
@@ -161,14 +211,8 @@ const SOUND_SETS = { duck: ['Ya1.mp3', 'Ya2.mp3'], fx1: ['D1.mp3', 'D2.mp3'] }
 // 移植自上游 dsh-whale-widget 的 codexScan()/normalizeCodexRateLimits()（lib/index.js），
 // 这里只需要额度窗口（5h / 周），不需要 token 统计，所以扫描策略简化为：
 // 按 mtime 从新到旧逐个文件找第一个带 rate_limits 的快照（最新会话活动必带），上限 48 个文件。
-// 角色清单的唯一来源是 pet-app/presets/roles.json —— server.js 不再写死角色名与图片名。
-const ROLES_FALLBACK = [{ id: 'default', name: 'gpt娘', image: 'DSniang1.png', route: '/dsh-whale/image.png' }]
-const ROLES_PRESET = loadPreset('roles.json', { roles: ROLES_FALLBACK })
-const PRESET_ROLES = Array.isArray(ROLES_PRESET.roles) && ROLES_PRESET.roles.length
-  ? ROLES_PRESET.roles
-  : ROLES_FALLBACK
-const DEFAULT_ROLE_ID = PRESET_ROLES[0].id
-// ⚠️ 这个 id 在代码里有语义（配额口径走 DeepSeek 余额的那个角色），不只是展示名：
+// 角色清单的唯一来源是 pet-app/presets/roles.json（经 presetRoles() 读取，支持热重载）。
+// ⚠️ 下面这个 id 在代码里有语义（配额口径走 DeepSeek 余额的那个角色），不只是展示名：
 //    改 presets/roles.json 里的 id 时必须同步改这里。
 const DEEPSEEK_ROLE_ID = 'whale'
 
@@ -177,7 +221,7 @@ let codexPlanCache = { at: 0, windows: null, planType: '', sessions: 0 }
 
 function currentRoleId() {
   const id = readConfig().role
-  return PRESET_ROLES.some((r) => r.id === id) ? id : DEFAULT_ROLE_ID
+  return presetRoles().some((r) => r.id === id) ? id : defaultRoleId()
 }
 
 function codexHome() {
@@ -356,8 +400,7 @@ async function dsBalance(force) {
 //          > presets/bubbles.json 的 whaleFallback。
 // 注意：这里刻意不在运行时长扫描上游前端源码 —— 上游一改写法就会静默降级成"台词变少"，
 //       抽取已挪到构建期，并由 tools/verify-fork.mjs 断言同步。
-const BUBBLES_PRESET = loadPreset('bubbles.json', {})
-const WHALE_DEFAULT_PRESET = loadPreset('bubble-default-whale.json', null)
+// 两个预设都在读取时经 presetBubbles() / presetWhaleDefaults() 惰性加载，支持热重载。
 
 function emptyQueue() { return { v: 1, tapAdvance: true, lib: [], items: [] } }
 
@@ -378,7 +421,8 @@ function moodImagePrefix(roleId) {
  * 台词池按角色分：gptAngry（gpt娘）/ whaleAngry（小鲸鱼）。
  */
 function angryQueue(level) {
-  const byRole = currentRoleId() === DEEPSEEK_ROLE_ID ? BUBBLES_PRESET.whaleAngry : BUBBLES_PRESET.gptAngry
+  const preset = presetBubbles()
+  const byRole = currentRoleId() === DEEPSEEK_ROLE_ID ? preset.whaleAngry : preset.gptAngry
   const pool = (byRole || {})[String(level)] || (byRole || {})['1']
   if (!Array.isArray(pool) || !pool.length) return null
   return {
@@ -402,6 +446,7 @@ function angryQueue(level) {
 function bubblePayload() {
   const role = currentRoleId()
   const cfg = readConfig()
+  const preset = presetBubbles()
   // 生气优先：任何角色在生气期间都只回生气台词
   const mood = currentMood()
   if (mood.state === 'angry') {
@@ -410,17 +455,18 @@ function bubblePayload() {
   }
   if (role === DEEPSEEK_ROLE_ID) {
     if (cfg.bubbleWhale) return { ok: true, source: 'stored', config: cfg.bubbleWhale }
-    const official = WHALE_DEFAULT_PRESET && Array.isArray(WHALE_DEFAULT_PRESET.items) ? WHALE_DEFAULT_PRESET.items : null
+    const whaleDefaults = presetWhaleDefaults()
+    const official = whaleDefaults && Array.isArray(whaleDefaults.items) ? whaleDefaults.items : null
     if (official && official.length) {
       return { ok: true, source: 'upstream-extracted', config: { v: 1, tapAdvance: true, lib: [], items: official } }
     }
-    if (BUBBLES_PRESET.whaleFallback) {
-      return { ok: true, source: 'preset-fallback', config: BUBBLES_PRESET.whaleFallback }
+    if (preset.whaleFallback) {
+      return { ok: true, source: 'preset-fallback', config: preset.whaleFallback }
     }
     return { ok: true, source: 'empty', config: emptyQueue() }
   }
   if (cfg.bubbleGpt) return { ok: true, source: 'stored', config: cfg.bubbleGpt }
-  if (BUBBLES_PRESET.gpt) return { ok: true, source: 'preset', config: BUBBLES_PRESET.gpt }
+  if (preset.gpt) return { ok: true, source: 'preset', config: preset.gpt }
   return { ok: true, source: 'empty', config: emptyQueue() }
 }
 
@@ -521,7 +567,7 @@ function handle(req, res) {
         if (k === 'dsKey' || src[k] === undefined) continue
         if ((k === 'demo' || k === 'autostart') && typeof src[k] !== 'boolean') continue
         if (k === 'dsMode' && src[k] !== 'total' && src[k] !== 'topup') continue
-        if (k === 'role' && !PRESET_ROLES.some((r) => r.id === src[k])) continue
+        if (k === 'role' && !presetRoles().some((r) => r.id === src[k])) continue
         if ((k === 'widget' || k === 'bubbleGpt' || k === 'bubbleWhale') &&
           (!src[k] || typeof src[k] !== 'object' || Array.isArray(src[k]))) continue
         // mood 也允许随备份走：换机后"继续生气"能还原（until 是绝对时间戳，过期即自动消气）
@@ -545,7 +591,8 @@ function handle(req, res) {
   if (p === '/dsh-whale/widget.js') return sendFile(res, path.join(ASSETS, 'whale-widget.js'))
   if (p === '/dsh-whale/image.png') {
     // 默认角色图取自 presets/roles.json（单一来源）；文件缺失时兼容旧文件名
-    const def = PRESET_ROLES.find((r) => r.id === DEFAULT_ROLE_ID) || PRESET_ROLES[0]
+    const rs = presetRoles()
+    const def = rs.find((r) => r.id === defaultRoleId()) || rs[0]
     const candidates = [def && def.image, 'DSniang1.png', 'DSniang02.png'].filter(Boolean)
     const hit = candidates.map((f) => path.join(ASSETS, String(f))).find((f) => fs.existsSync(f))
     return hit ? sendFile(res, hit) : send(res, 404, 'image missing')
@@ -586,6 +633,19 @@ function handle(req, res) {
     })
   }
 
+  // —— 热重载 ——
+  // GET /dsh-whale/reload：清预设缓存并强制重读（前端发现文件变化时自动调；也可手动调）
+  // 返回各预设的条目数，便于确认"到底重载到了什么"。纯读操作，不改任何用户配置。
+  if (p === '/dsh-whale/reload') {
+    let result = null
+    try {
+      result = reloadPresets()
+    } catch (err) {
+      return send(res, 500, JSON.stringify({ ok: false, error: String((err && err.message) || err) }), MIME['.json'])
+    }
+    return send(res, 200, JSON.stringify({ ok: true, reloadedAt: Date.now(), presets: result }), MIME['.json'])
+  }
+
   if (p === '/dsh-whale/rua.gif') return sendFile(res, path.join(ASSETS, 'rua.gif'))
 
   // —— 情绪系统 ——
@@ -619,11 +679,12 @@ function handle(req, res) {
     const f = path.join(ASSETS, 'mood', prefix + '-' + state + '.png')
     if (fs.existsSync(f)) return sendFile(res, f)
     // 该角色没有成套素材 → 回退到它的角色图（等价于"永远待机"，不会 404）
-    const role = PRESET_ROLES.find((r) => r.id === currentRoleId())
+    const role = presetRoles().find((r) => r.id === currentRoleId())
     if (role && role.image && fs.existsSync(path.join(ASSETS, String(role.image)))) {
       return sendFile(res, path.join(ASSETS, String(role.image)))
     }
-    const def = PRESET_ROLES.find((r) => r.id === DEFAULT_ROLE_ID) || PRESET_ROLES[0]
+    const rs = presetRoles()
+    const def = rs.find((r) => r.id === defaultRoleId()) || rs[0]
     const candidates = [def && def.image, 'DSniang1.png', 'DSniang02.png'].filter(Boolean)
     const hit = candidates.map((x) => path.join(ASSETS, String(x))).find((x) => fs.existsSync(x))
     return hit ? sendFile(res, hit) : send(res, 404, 'image missing')
@@ -670,7 +731,7 @@ function handle(req, res) {
     // 角色清单 = presets/roles.json（角色名/图片/顺序都改那一份即可）
     return send(res, 200, JSON.stringify({
       ok: true,
-      roles: PRESET_ROLES.map((r) => ({
+      roles: presetRoles().map((r) => ({
         id: r.id,
         name: r.name,
         url: r.route,
@@ -683,7 +744,7 @@ function handle(req, res) {
   }
   if (p === '/dsh-whale/role-image.png') {
     const id = u.searchParams.get('id') || ''
-    const role = PRESET_ROLES.find((r) => r.id === id)
+    const role = presetRoles().find((r) => r.id === id)
     if (!role) return send(res, 404, 'unknown role')
     const file = path.join(ASSETS, String(role.image || ''))
     if (!fs.existsSync(file)) return send(res, 404, 'role image missing: ' + role.image)
@@ -780,7 +841,12 @@ module.exports = {
   writeConfig,
   onConfigChanged,
   CONFIG_PATH: CONFIG_FILE,
-  PRESET_ROLES,
+  // 角色清单通过访问器暴露（支持热重载；不要在这里快照成数组）
+  presetRoles,
+  defaultRoleId,
+  // 热重载：供 main.js 的监听器与本机工具调用
+  reloadPresets,
+  clearPresetCache,
   // 情绪系统：供 tools/smoke-pet.mjs 等测试读取/重置。
   // resetMoodState() 只清「1 分钟点击缓冲」这个纯内存状态与配置里的 mood，不碰其它设置。
   currentMood,

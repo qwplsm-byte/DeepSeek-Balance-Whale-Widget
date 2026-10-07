@@ -4,8 +4,9 @@
 // 只有角色/泡泡/菜单本体接鼠标，其余全部点到桌面下层。
 
 const { app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage, shell } = require('electron')
+const fs = require('fs')
 const path = require('path')
-const { startServer, readConfig, writeConfig, onConfigChanged, PRESET_ROLES } = require('./server')
+const { startServer, readConfig, writeConfig, onConfigChanged, presetRoles, reloadPresets } = require('./server')
 
 let win = null
 let tray = null
@@ -13,7 +14,7 @@ let port = 0
 
 // 托盘图标取自 presets/roles.json 的第一个角色（角色清单是单一来源），缺文件再回退
 function roleIconPath() {
-  const first = PRESET_ROLES[0] || {}
+  const first = presetRoles()[0] || {}
   const name = String(first.image || 'DSniang1.png')
   return path.join(__dirname, 'assets', name)
 }
@@ -76,6 +77,14 @@ function buildTrayMenu() {
     { label: '设置（API Key / 演示模式 / 开机自启）', click: () => shell.openExternal('http://127.0.0.1:' + port + '/config') },
     { type: 'separator' },
     {
+      // 热重载是自动的（见下方 watchForReload）；这里给一个手动入口，
+      // 用于「自动没触发」（某些网络盘/编辑器原子保存）或想立刻看到效果时。
+      label: '立即重载（刷新挂件 + 重读预设）',
+      click: () => reloadPresetsNow('托盘菜单手动触发'),
+    },
+    { label: '重启（进程级，用于改过 server.js）', click: () => relaunchApp('托盘菜单手动触发') },
+    { type: 'separator' },
+    {
       label: '开机自启',
       type: 'checkbox',
       checked: readConfig().autostart === true,
@@ -98,6 +107,99 @@ ipcMain.on('pet-mouse', (_ev, interactive) => {
   if (win) win.setIgnoreMouseEvents(!interactive, { forward: true })
 })
 
+// ============================================================================
+// 热重载
+// ----------------------------------------------------------------------------
+// 目标：改代码/素材后不用「托盘退出 → 再双击 start-pet.bat」。分三级，代价从小到大：
+//   ① public/*、assets/*（前端 js、角色图、情绪素材、音效）→ 只重新加载窗口（≈F5）
+//   ② presets/*.json（角色清单、台词池）                   → 调 reloadPresets() 重读，不重启
+//   ③ server.js / main.js / preload.js（进程侧代码）        → app.relaunch() 整进程重启
+//
+// 为什么 ③ 用 relaunch 而不是"热换模块"：本文件与 server.js 同进程，
+//   热换 require 缓存会让旧模块的状态（配置监听器、情绪计数、额度缓存）与新模块分叉；
+//   relaunch 是 Electron 自带的可靠重启，且端口取自 config（默认恒为 37890）——
+//   端口不变 ⇒ origin 不变 ⇒ localStorage 里挂件的位置/外观设置都会保留。
+//   不使用"关掉再 listen 同一个端口"，那样会遇到 TIME_WAIT 抢占。
+//
+// 防抖：编辑器保存常触发多次事件，300ms 内合并成一次。
+const WATCH_DEBOUNCE_MS = 300
+const watchState = { timer: null, pending: new Set() }
+
+function reloadRenderer(reason) {
+  if (!win) return
+  console.log('[dsh-pet] 热重载：重新加载窗口（' + reason + '）')
+  try { win.webContents.reloadIgnoringCache() } catch (err) { /* 窗口可能正在关 */ }
+}
+
+function reloadPresetsNow(reason) {
+  try {
+    const r = reloadPresets()
+    console.log('[dsh-pet] 热重载：预设已重读（' + reason + '）→ 角色 ' + r.roles + ' 个')
+    reloadRenderer('预设已重读')
+  } catch (err) {
+    console.warn('[dsh-pet] 热重载预设失败（保持运行）：' + ((err && err.message) || err))
+  }
+}
+
+function relaunchApp(reason) {
+  console.log('[dsh-pet] 热重载：进程侧代码已更新（' + reason + '）→ 正在自动重启')
+  try {
+    app.relaunch({ args: process.argv.slice(1) })
+    app.exit(0)
+  } catch (err) {
+    console.warn('[dsh-pet] 自动重启失败，请手动重启：' + ((err && err.message) || err))
+    reloadRenderer('代码已更新（需手动重启）')
+  }
+}
+
+function handleChanged(files) {
+  const list = [...files]
+  if (!list.length) return
+  // 进程侧代码：必须整进程重启才能安全生效
+  if (list.some((f) => /[\\/](server|main|preload|accounting)\.(js|mjs)$/.test(f))) {
+    return relaunchApp(list.map((f) => path.basename(f)).join(','))
+  }
+  if (list.some((f) => /[\\/]presets[\\/].*\.json$/.test(f))) return reloadPresetsNow('presets 已更新')
+  // 其余（公开目录、素材）只要能刷新窗口就够
+  reloadRenderer('前端/素材已更新')
+}
+
+function watchForReload() {
+  const targets = [
+    path.join(__dirname, 'server.js'),
+    path.join(__dirname, 'main.js'),
+    path.join(__dirname, 'preload.js'),
+    path.join(__dirname, 'presets'),
+    path.join(__dirname, 'public'),
+    path.join(__dirname, 'assets'),
+  ]
+  for (const t of targets) {
+    try {
+      if (!fs.existsSync(t)) continue
+      const isDir = fs.statSync(t).isDirectory()
+      fs.watch(t, { persistent: false, recursive: isDir }, (_evt, name) => {
+        if (name) {
+          const base = String(name)
+          // 忽略噪声：临时文件、编辑器交换文件、我们的原子写临时文件
+          if (/\.(tmp|swp|swx|bak)$/i.test(base) || base.startsWith('.')) return
+        }
+        const full = name ? path.join(t, String(name)) : t
+        watchState.pending.add(full)
+        if (watchState.timer) clearTimeout(watchState.timer)
+        watchState.timer = setTimeout(() => {
+          watchState.timer = null
+          const files = [...watchState.pending]
+          watchState.pending.clear()
+          handleChanged(files)
+        }, WATCH_DEBOUNCE_MS)
+      })
+    } catch (err) {
+      console.warn('[dsh-pet] 无法监听 ' + t + '：' + ((err && err.message) || err))
+    }
+  }
+  console.log('[dsh-pet] 热重载已启用：改 presets/素材会自动刷新，改 server.js 会自动重启')
+}
+
 // 单实例锁：开机自启与手动双击可能同时发生，别出现两只宠物抢同一个端口
 const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
@@ -115,6 +217,7 @@ if (!gotLock) {
       createWindow()
       createTray()
       applyAutostart()
+      watchForReload()
     })
     app.on('activate', () => { if (!win) createWindow() })
   })

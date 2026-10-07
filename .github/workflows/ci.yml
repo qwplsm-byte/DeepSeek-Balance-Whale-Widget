@@ -125,3 +125,8 @@ jobs:
       # 上一个角色留下的「98 %」——单位不对、数值也不是自己的。
       - name: Role-switch balance reset
         run: node tools/test-role-switch-reset.mjs
+
+      # 热重载：改 presets/*.json 后不重启就读到新值；JSON 写坏时沿用上一次成功的值
+      # （而不是降级成"角色消失/台词清空"，那类静默降级很难查）。
+      - name: Hot reload (presets)
+        run: node tools/test-hot-reload.mjs
