@@ -327,6 +327,20 @@ check('聊天选项 / 吃醋机制（presets/talk.json + 三处接线）', () =>
   assert(t.llmPrompt && t.llmPrompt.system && t.llmPrompt.open && t.llmPrompt.react,
     'llmPrompt 需要 system / open / react（人设文案不写在代码里）')
 
+  // —— 切换惩罚（2026-10-07 追加：没打招呼就切走 → 被甩下的那位吃醋/伤心，
+  //    切回来锁交互 / 或直接躲起来让你切不回）——
+  const sa = t.switchAway
+  assert(sa && typeof sa === 'object', 'talk.switchAway 缺失（切换惩罚没配置）')
+  assert(typeof sa.enabled === 'boolean', 'switchAway.enabled 必须是布尔值')
+  assert(Number(sa.holdMs) >= 1000, 'switchAway.holdMs 至少 1000（被甩下的情绪要有存在感）')
+  assert(Number(sa.lockMs) >= 0 && Number(sa.lockMs) <= 10 * 60000, 'switchAway.lockMs 必须在 0~10 分钟')
+  assert(Number(sa.hideMaxMs) >= 1000 && Number(sa.hideMaxMs) <= 180000,
+    'switchAway.hideMaxMs 必须 ≤180000 —— 用户定的硬上限是「消失最多 3 分钟」')
+  assert(Number(sa.hideMinMs) >= 1000 && Number(sa.hideMinMs) <= Number(sa.hideMaxMs),
+    'switchAway.hideMinMs 必须 ≥1s 且 ≤ hideMaxMs')
+  assert(Number(sa.sadChance) >= 0 && Number(sa.sadChance) <= 1, 'switchAway.sadChance 必须在 0~1（伤心概率）')
+  assert(Number(sa.hideChance) >= 0 && Number(sa.hideChance) <= 1, 'switchAway.hideChance 必须在 0~1')
+
   // —— 三处接线 ——
   const front = fs.readFileSync(FRONT_FILE, 'utf8')
   for (const need of ["'/dsh-whale/talk.json'", 'function talkSchedule', 'function talkTry', 'function talkChoose',
@@ -336,6 +350,11 @@ check('聊天选项 / 吃醋机制（presets/talk.json + 三处接线）', () =>
   assert(front.includes('talkCfg = d.talk'), 'refreshBubbleCfgFromHost/loadBubbleCfg 未接收顶层 talk 配置')
   assert(front.includes('talkBaselineAt = Date.now()'), '点她未重置聊天选项的 idle 基准')
   assert(front.includes('talkChooseIgnored'), '点泡泡本体未按"被无视"处理')
+  // 按角色情绪 + 切换惩罚的前端三件套：交互锁、面板躲藏置灰、切完立刻对表
+  for (const need of ['function moodLocked', 'moodLockUntil', 'dshwv-roleitem-hidden',
+    'refreshRoleListQuiet', 'roleListHasHidden', 'hidden && typeof d.id']) {
+    assert(front.includes(need), '前端缺少切换惩罚接线：' + need)
+  }
   const server = fs.readFileSync(path.join(ROOT, 'pet-app', 'server.js'), 'utf8')
   for (const need of ["p === '/dsh-whale/talk.json'", 'function talkSpec', 'function talkOpenPayload',
     'function talkResolve', 'function talkRivalHit', 'function llmChat', 'function normalizeLlm',
@@ -345,6 +364,18 @@ check('聊天选项 / 吃醋机制（presets/talk.json + 三处接线）', () =>
   assert(server.includes('MOOD_STATES') && server.includes("jealous: 'angry'"),
     '服务端缺少多情绪状态或素材回落链（吃醋/伤心没有素材时要回落到生气素材）')
   assert(server.includes("p === '/pet-test-llm'"), '服务端缺少 /pet-test-llm（设置页的「测试连接」）')
+  // 按角色独立的情绪 + 切换惩罚的服务端半区
+  for (const need of ['function readMoods', 'function writeMood', 'function moodSlot',
+    'function applySwitchAway', 'function lockOnReturn', 'function roleHiddenMs',
+    "by: 'switch'", 'hideUntil', 'lockUntil', 'hidden: true']) {
+    assert(server.includes(need), 'pet-app/server.js 缺少按角色情绪/切换惩罚接线：' + need)
+  }
+  assert(server.includes("'moods'"), 'CONFIG_KEYS 里没有 moods（按角色情绪落不了盘/进不了备份）')
+  // 告别功能（点过再切换 → 不吃醋/不伤心）
+  assert(server.includes('if (!farewell) applySwitchAway(prev)'), '服务端未按 farewell 跳过切换惩罚')
+  for (const need of ['dshw-role-bye', 'farewell: farewell', "menuLabel('告别')", 'syncByeBtn']) {
+    assert(front.includes(need), '前端缺少告别接线：' + need)
+  }
   const host = fs.readFileSync(path.join(ROOT, 'lib', 'index.js'), 'utf8')
   assert(host.includes("path: '/dsh-whale/talk.json'"), 'lib/index.js 未登记 /dsh-whale/talk.json（前端会静默 404 + ci-audit 对等检查判红）')
   assert(host.includes('enabled: false'), 'lib/index.js 的 talk.json 占位应答应明确 enabled:false')
@@ -419,11 +450,11 @@ check('角色图 PNG 结构（3 个文件）', () => {
 check('情绪素材（pet-app/assets/mood）', () => {
   const dir = path.join(ROOT, 'pet-app', 'assets', 'mood')
   assert(fs.existsSync(dir), 'pet-app/assets/mood 不存在（情绪系统需要成套素材）')
-  // 每个有情绪的角色一套：<前缀>-idle.png / <前缀>-angry.png 是**必需**的；
-  // 吃醋（jealous）/伤心（sad）等是**可选**扩展态：文件在就必须合法且与 idle 同画布，
-  // 不在就由宿主回落到生气素材（见 server.js 的 MOOD_STATE_FALLBACK），不算错误。
+  // 每个在场角色**四态成套**：<前缀>-{idle,angry,jealous,sad}.png（用户 2026-10-07
+  // 提供了两位的吃醋/伤心 共四张，缺一张就拦）。前缀 = presets/roles.json 的角色 id。
+  // （运行时的 MOOD_STATE_FALLBACK 回落链是给**以后新增角色**用的兜底，不是这两位缺图的借口。）
   const EXPECT = { gpt: 'default', whale: 'whale' }
-  const EXTRA = ['jealous', 'sad']
+  const STATES = ['idle', 'angry', 'jealous', 'sad']
   const details = []
   const checkOne = (f, abs) => {
     assert(fs.existsSync(abs), '缺少 ' + f + '（生成见 pet-app/README.md 的素材管线说明）')
@@ -437,19 +468,13 @@ check('情绪素材（pet-app/assets/mood）', () => {
   }
   for (const prefix of Object.keys(EXPECT)) {
     const pair = {}
-    for (const state of ['idle', 'angry']) pair[state] = checkOne(prefix + '-' + state + '.png', path.join(dir, prefix + '-' + state + '.png'))
-    // 同角色两态必须同尺寸：否则切换时角色会跳位（生成脚本已断言，这里上锁）
-    assert(pair.idle === pair.angry,
-      prefix + ' 的 idle 与 angry 尺寸不一致（' + pair.idle + ' vs ' + pair.angry + '）—— 情绪切换会跳位')
-    const extras = []
-    for (const state of EXTRA) {
-      const abs = path.join(dir, prefix + '-' + state + '.png')
-      if (!fs.existsSync(abs)) continue
-      const size = checkOne(prefix + '-' + state + '.png', abs)
-      assert(size === pair.idle, prefix + '-' + state + ' 与 idle 画布不一致（' + size + ' vs ' + pair.idle + '）—— 切换会跳位')
-      extras.push(state)
+    for (const state of STATES) pair[state] = checkOne(prefix + '-' + state + '.png', path.join(dir, prefix + '-' + state + '.png'))
+    // 同角色各态必须同尺寸：否则切换时角色会跳位（生成脚本已断言，这里上锁）
+    for (const state of STATES.slice(1)) {
+      assert(pair.idle === pair[state],
+        prefix + ' 的 idle 与 ' + state + ' 尺寸不一致（' + pair.idle + ' vs ' + pair[state] + '）—— 情绪切换会跳位')
     }
-    details.push(prefix + ' ' + pair.idle + (extras.length ? '（含 ' + extras.join('/') + '）' : '（未提供吃醋/伤心素材，回落生气）'))
+    details.push(prefix + ' ' + pair.idle + ' 四态')
   }
   return details.join(' / ')
 })

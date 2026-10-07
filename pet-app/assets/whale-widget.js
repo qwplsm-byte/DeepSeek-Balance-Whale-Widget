@@ -475,6 +475,12 @@ var css = [
   '.dshwv-roleitem{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:6px;cursor:pointer;color:#203170;font-size:12px;white-space:nowrap;min-width:0}',
   '.dshwv-roleitem:hover{background:rgba(32,49,112,.1)}',
   '.dshwv-roleitem.dshwv-roleitem-cur{background:rgba(32,49,112,.14)}',
+  // 切换惩罚：躲藏中的角色置灰 + 点不动（倒计时标签实时走字）
+  '.dshwv-roleitem.dshwv-roleitem-hidden{opacity:.5;cursor:not-allowed}',
+  '.dshwv-roleitem.dshwv-roleitem-hidden:hover{background:transparent}',
+  '.dshwv-rolehide{flex:0 0 auto;font-size:10px;line-height:1;padding:2px 4px;border-radius:3px;background:#c0392b;color:#fff}',
+  // 情绪小标签（吃醋/伤心/生气）：纯展示
+  '.dshwv-rolemood{flex:0 0 auto;font-size:10px;line-height:1;padding:2px 4px;border-radius:3px;background:rgba(32,49,112,.12);color:#203170}',
   '.dshwv-rolethumb{width:22px;height:22px;border-radius:4px;object-fit:cover;flex:0 0 auto;background:#e8ecf7}',
   '.dshwv-rolename{flex:1;min-width:0;overflow:hidden}',
   '.dshwv-nameinner{display:inline-flex;white-space:nowrap;transition:transform .22s ease}',
@@ -1725,6 +1731,30 @@ roleBtn.addEventListener('click', function (e) { e.stopPropagation(); toggleRole
 roleImportBtn.addEventListener('click', function (e) { e.stopPropagation(); roleFileInput.click() })
 roleFileInput.addEventListener('change', function () { onRoleFileChosen(roleFileInput) })
 menuBox.appendChild(rowRole)
+// —— 告别（2026-10-07 用户定稿）：点一下「告别」，再切换角色就不会让被甩下的那位吃醋/伤心
+//    标记记在 localStorage（dshw-role-bye = 告别时所在角色 id），随下一次**离开她**的切换消耗掉；
+//    宿主在 role-current 里看到 farewell:true 就跳过 applySwitchAway（不写情绪/躲藏/锁）。
+var rowBye = menuRow()
+rowBye.appendChild(menuLabel('告别'))
+var byeBtn = document.createElement('button')
+byeBtn.type = 'button'
+byeBtn.className = 'dshwv-roleimport'
+function syncByeBtn() {
+  var bye = ''
+  try { bye = localStorage.getItem('dshw-role-bye') || '' } catch (err) {}
+  var cur = (currentRole && currentRole.id) ? currentRole.id : 'default'
+  byeBtn.textContent = bye === cur ? '已告别' : '告别'
+  byeBtn.title = '打声招呼再走：点击后下次切换角色，她不会吃醋/伤心（对当前角色生效，切走一次后失效）'
+}
+syncByeBtn()
+byeBtn.addEventListener('click', function (e) {
+  e.stopPropagation()
+  var cur = (currentRole && currentRole.id) ? currentRole.id : 'default'
+  try { localStorage.setItem('dshw-role-bye', cur) } catch (err) {}
+  syncByeBtn()
+})
+rowBye.appendChild(byeBtn)
+menuBox.appendChild(rowBye)
 menuBox.appendChild(row1)
 menuBox.appendChild(row2)
 menuBox.appendChild(row6)
@@ -15184,9 +15214,12 @@ var MOOD_IMG_URL = '/dsh-whale/mood-image.png'
 var moodState = 'normal'     // normal | angry | jealous | sad
 var moodLevel = 0
 var moodUntil = 0            // 该情绪期的绝对到期时刻（宿主下发；用来判断"这一轮不高兴"是否已经弹过选项）
+var moodLockUntil = 0        // 交互锁绝对时刻（切换惩罚）：锁内点她/拖她她一律不理会
 var moodPollTimer = null
 
 function moodIsDown() { return moodState !== 'normal' }
+// 她在气头上不接你的话（切回来那阵子）。锁是宿主按绝对时间戳下发的，本地只比大小。
+function moodLocked() { return moodLockUntil > Date.now() }
 
 function applyRoleImage() {
   // 不高兴时用情绪素材；否则用当前角色图。加 ?v= 破浏览器缓存（宿主已 no-store，这里是双保险）。
@@ -15229,6 +15262,8 @@ function setMood(state, level, until) {
 function applyMoodSnapshot(m) {
   try {
     if (!m || typeof m.state !== 'string') return false
+    // 交互锁跟着情绪一起下发（切换惩罚；0 = 没锁）
+    moodLockUntil = Number(m.lockUntil) || 0
     return setMood(m.state, Number(m.level) || 0, Number(m.until) || 0)
   } catch (err) { return false }
 }
@@ -15419,6 +15454,8 @@ function talkBusy() {
   if (costBubbleActive || menuOpen || (drag && drag.active)) return true
   // 「等待提问 / 授权」与余额预警是**系统级**常驻泡，优先级高于她的聊天：不抢、等下一轮
   if (bubbleScene && (bubbleScene.kind === 'wait' || bubbleScene.kind === 'alert')) return true
+  // 她正锁着你（切换惩罚）= 拒绝沟通，这时候弹选项说不通 → 等锁过再说
+  if (moodLocked()) return true
   return false
 }
 function talkTry() {
@@ -15643,7 +15680,12 @@ function makeNameCell(className, text) {
 function applyRole(id, name, url) {
   currentRole = { id: id, name: name, url: url }
   setRoleBtnText(name)
+  var prevRole = null
+  try { prevRole = localStorage.getItem('dshw-role') } catch (err) {}
   try { localStorage.setItem('dshw-role', id) } catch (err) {}
+  // 告别标记：告别过、且这次正是**离开那位**（prevRole === 标记）→ 携带 farewell，宿主跳过切换惩罚
+  var farewell = false
+  try { farewell = !!prevRole && prevRole !== id && (localStorage.getItem('dshw-role-bye') || '') === prevRole } catch (err) {}
   // custom-pet：切角色时必须**先清掉上一个角色的余额口径**。
   // 否则从 gpt娘（Codex 百分比，currency='%'）切到小鲸鱼（DeepSeek 人民币）时，
   // 若新角色拿不到数（例如未配 API Key → 宿主回 ok:false/NO_KEY），refresh() 走 error 分支
@@ -15653,12 +15695,25 @@ function applyRole(id, name, url) {
   // custom-pet：告知宿主当前角色（独立宠物端按角色切换额度口径/泡泡/记账文案；DSH 端 404 静默忽略）。
   // ⚠️ 必须等 PUT 落地后再拉泡泡/余额：三个请求并发时 GET 可能先到、宿主还按旧角色应答，
   // 表现就是「切完角色首击还是旧口径」（实测踩过）。
+  // ⚠️ 情绪**按角色各记各的**，切完必须立刻对一次表（否则要等 20s 轮询才换图/才知道被锁）；
+  //    PUT 的响应里还带着宿主的裁定：ok:false,hidden = 那位躲起来了没切成，要回退。
   try {
-    fetch('/dsh-whale/role-current.json', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id }) })
-      .catch(function () {})
-      .then(function () {
+    fetch('/dsh-whale/role-current.json', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id, farewell: farewell }) })
+      .then(function (r) { return r.json() })
+      .catch(function () { return null })
+      .then(function (d) {
+        // 切换被拒（她躲起来了）：本地已按新角色画了图 —— 回退到宿主真正记录的角色
+        if (d && d.ok === false && d.hidden && typeof d.id === 'string' && d.id) {
+          try { localStorage.setItem('dshw-role', d.id) } catch (err) {}
+          try { loadRoles() } catch (err) {}   // 找回宿主当前角色并重新 applyRole
+          return
+        }
+        // 告别已随这次切换消耗掉（没切成/网络失败则留着下次用）
+        if (farewell && d && d.ok !== false) { try { localStorage.removeItem('dshw-role-bye') } catch (err) {} }
         try { refreshBubbleCfgFromHost(function () {}) } catch (err) {}
         try { refresh(false) } catch (err) {}
+        // 立刻拿这位角色自己的情绪（含切换惩罚给的交互锁）
+        try { moodReport(false) } catch (err) {}
       })
   } catch (err) {}
   // 角色图由 applyRoleImage() 统一决定：生气时显示生气素材，其余显示当前角色图
@@ -15674,6 +15729,7 @@ function roleUrl(id) {
   if (id === 'default') return IMG_URL
   return '/dsh-whale/role-image.png?id=' + encodeURIComponent(id)
 }
+var rolePanelTimer = null // 面板开着时每秒重绘：躲藏倒计时要走字
 function toggleRolePanel() {
   if (rolePanel.classList.contains('dshwv-rolelist-open')) { closeRolePanel(); return }
   try {
@@ -15687,18 +15743,52 @@ function toggleRolePanel() {
     rolePanel.style.top = (b.bottom + 6) + 'px'
     rolePanel.style.display = 'block'
     rolePanel.classList.add('dshwv-rolelist-open')
+    // 打开面板时先刷一次角色清单（躲藏状态可能刚过期/刚开始，缓存里的 hideUntil 不新鲜）
+    try { refreshRoleListQuiet() } catch (err) {}
+    // 面板开着期间每秒重绘：躲藏中的角色倒计时（…s 后回来）要实时走字；
+    // 条件 = 此刻有人躲着，或**上一帧画过躲藏标签**（过期后要靠这最后一帧把置灰摘掉，
+    // 否则「躲起来 1s」会卡在面板上）。没人躲时**不重绘**（每秒 innerHTML 重建会打断名称跑马灯）。
+    if (!rolePanelTimer) {
+      rolePanelTimer = setInterval(function () {
+        try { if (rolePanelHasHidden || roleListHasHidden()) renderRolePanel() } catch (err) {}
+      }, 1000)
+    }
+  } catch (err) {}
+}
+var rolePanelHasHidden = false // 上一帧面板上画过躲藏条吗（倒计时归零后的收尾重绘用）
+function roleListHasHidden() {
+  var now = Date.now()
+  for (var i = 0; i < roleList.length; i++) {
+    if (Number(roleList[i].hideUntil) > now && roleList[i].id !== currentRole.id) return true
+  }
+  return false
+}
+// 只刷数据 + 重画面板（不带 loadRoles 那套"恢复上次角色"的副作用，免得开面板引发意外切换）
+function refreshRoleListQuiet() {
+  try {
+    fetch(ROLE_URL, { cache: 'no-store' })
+      .then(function (r) { return r.json() })
+      .then(function (d) { if (d && d.ok && Array.isArray(d.roles)) { roleList = d.roles; renderRolePanel() } })
+      .catch(function () {})
   } catch (err) {}
 }
 function closeRolePanel() {
   rolePanel.classList.remove('dshwv-rolelist-open')
   rolePanel.style.display = 'none'
+  if (rolePanelTimer) { clearInterval(rolePanelTimer); rolePanelTimer = null }
 }
 function renderRolePanel() {
   try {
     rolePanel.innerHTML = ''
+    rolePanelHasHidden = false
     roleList.forEach(function (r) {
+      // 切换惩罚：她躲起来了 → 置灰 + 倒计时 + 点不动（hideUntil 是宿主下发的绝对时刻）
+      var hideMs = (Number(r.hideUntil) || 0) - Date.now()
+      var hidden = hideMs > 0 && r.id !== currentRole.id
+      if (hidden) rolePanelHasHidden = true
       var item = document.createElement('div')
-      item.className = 'dshwv-roleitem' + (currentRole.id === r.id ? ' dshwv-roleitem-cur' : '')
+      item.className = 'dshwv-roleitem' + (currentRole.id === r.id ? ' dshwv-roleitem-cur' : '') +
+        (hidden ? ' dshwv-roleitem-hidden' : '')
       var thumb = document.createElement('img')
       thumb.className = 'dshwv-rolethumb'
       thumb.src = r.url
@@ -15716,6 +15806,19 @@ function renderRolePanel() {
         nameWrap.appendChild(gifTag)
       }
       nameWrap.appendChild(name)
+      if (hidden) {
+        var hideTag = document.createElement('span')
+        hideTag.className = 'dshwv-rolehide'
+        hideTag.textContent = '躲起来 ' + Math.ceil(hideMs / 1000) + 's'
+        hideTag.title = '她还在生你的气，倒计时结束才会回来'
+        nameWrap.appendChild(hideTag)
+      } else if (r.moodState && r.moodState !== 'normal') {
+        // 情绪小标签（她此刻什么脸色）：仅展示，不影响点按
+        var moodTag = document.createElement('span')
+        moodTag.className = 'dshwv-rolemood'
+        moodTag.textContent = r.moodState === 'jealous' ? '吃醋' : (r.moodState === 'sad' ? '伤心' : '生气')
+        nameWrap.appendChild(moodTag)
+      }
       item.appendChild(thumb)
       item.appendChild(nameWrap)
       var pin = document.createElement('button')
@@ -15741,6 +15844,8 @@ function renderRolePanel() {
         item.appendChild(del)
       }
       item.addEventListener('click', function () {
+        // 躲藏中的角色点不动（双保险：宿主 role-current 也会拒绝；本地就别切过去再弹回来）
+        if (hidden) return
         applyRole(r.id, r.name, roleUrl(r.id))
       })
       bindNameMarquee(item, name)
@@ -17246,6 +17351,9 @@ function onDocPointerDown(e) {
   }
   if (e.button !== 0 && e.pointerType === 'mouse') return
   if (!isWhaleHit(e)) return
+  // custom-pet：切换惩罚 —— 她在交互锁内（被甩下又切回来那阵子），点她/拖她一律装聋。
+  // 放在 isWhaleHit 之后：只锁"她本体"，☰按钮/右键菜单/泡泡都在上面提前 return，不受影响。
+  if (moodLocked()) return
   try { e.preventDefault(); e.stopPropagation() } catch (err) {}
   var vp = viewport()
   var rect = root.getBoundingClientRect()

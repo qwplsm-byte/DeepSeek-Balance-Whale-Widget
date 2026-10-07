@@ -51,44 +51,49 @@ npm run smoke                  # 冒烟：角色、台词、情绪阈值与档�
 
 ## 情绪素材
 
-每个有情绪的角色一套（`<前缀>-idle.png` / `<前缀>-angry.png`，前缀 = `presets/roles.json` 里的角色 id）：
+每个在场角色**四态成套**（前缀 = `presets/roles.json` 里的角色 id）：
 
-| 前缀 | 角色 | 文件 |
-|---|---|---|
-| `gpt` | gpt娘（default） | `mood/gpt-idle.png` / `mood/gpt-angry.png`（吃醋/伤心素材待补，缺了就回落生气素材） |
-| `whale` | 小鲸鱼（whale） | `mood/whale-idle.png` / `mood/whale-angry.png` |
+| 前缀 | 角色 | 文件（`mood/`） | 原图（`mood-src/`） |
+|---|---|---|---|
+| `gpt` | gpt娘（default） | `gpt-{idle,angry,jealous,sad}.png` | `idle.jpg` / `angry.jpg` / `gpt-jealous.jpg` / `gpt-sad.jpg` |
+| `whale` | 小鲸鱼（whale） | `whale-{idle,angry,jealous,sad}.png` | `idle.jpg` / `whale-angry.jpg` / `whale-jealous.jpg` / `whale-sad.jpg` |
 
 **多态（吃醋 / 伤心 / 以后想加的任何表情）**：同一个脚本加 `--state <名字>=<原图>` 即可，可重复。
 所有状态都拿**同一张 idle 基准图**归一化、贴死同一块画布的右下角 —— 这是多态之间也不跳位的前提：
 
 ```bash
-# 生气（= --state angry=<图> 的简写，两种写法等价）
-python tools/make-mood-sprites.py --ref pet-app/assets/DSniang1.png \
-                                  --angry pet-app/assets/mood-src/angry.jpg --prefix gpt
-# 吃醋（素材到手后跑这一条就自动生效，不用改代码）
+# gpt娘：四态一次生成（--angry 就是 --state angry= 的简写）
 python tools/make-mood-sprites.py --ref pet-app/assets/DSniang1.png --prefix gpt \
-                                  --state jealous=pet-app/assets/mood-src/jealous.jpg
-# 一次生成多个状态也行
-python tools/make-mood-sprites.py --ref pet-app/assets/DSniang1.png --prefix gpt \
-                                  --state jealous=.../jealous.jpg --state sad=.../sad.jpg
-python tools/make-mood-sprites.py --ref pet-app/assets/ds-whale.png \
-                                  --angry pet-app/assets/mood-src/whale-angry.jpg --prefix whale
+      --angry  pet-app/assets/mood-src/angry.jpg \
+      --state jealous=pet-app/assets/mood-src/gpt-jealous.jpg \
+      --state sad=pet-app/assets/mood-src/gpt-sad.jpg
+# 小鲸鱼：同理
+python tools/make-mood-sprites.py --ref pet-app/assets/ds-whale.png --prefix whale \
+      --angry  pet-app/assets/mood-src/whale-angry.jpg \
+      --state jealous=pet-app/assets/mood-src/whale-jealous.jpg \
+      --state sad=pet-app/assets/mood-src/whale-sad.jpg
 ```
 
 缺某个状态的素材时，宿主按 `state → angry → idle → 角色图` 依次回落（`pet-app/server.js` 的
-`MOOD_STATE_FALLBACK`）：**永远不会 404，也不会白屏**。补上文件即刻生效（热重载会刷新挂件）。
+`MOOD_STATE_FALLBACK`）：**永远不会 404，也不会白屏**。两位在场角色的四态已齐全，
+回落链是给以后新增角色用的（只做 idle/angry 两态也能上线）。门禁对这两位**四态缺一不可**。
 
-**三个必须遵守的要点**（都踩过，各对应一次"看起来没裁剪好"）：
+**四个必须遵守的要点**（都踩过，各对应一次"看起来没裁剪好"）：
 
 1. **以「运行时真正使用的 idle 图」为几何基准。** `--ref` 必须是挂件 idle 状态下实际
    取的那张图（gpt = `DSniang1.png`，whale = `ds-whale.png`）。早先拿 2048 原图当基准，
    而运行时用的是另一张成品图 —— 两套坐标系没对齐，切换时角色会缩放 + 位移。
-2. **归一化依据用「头部宽度」，不要用身体高度。** 两态姿势不同（idle 紧裁胸像、angry
+2. **归一化依据用「头部宽度」，不要用身体高度。** 各状态姿势不同（idle 紧裁胸像、angry
    常露出更多肩膀/发尾），身体高度不可比。实测小鲸鱼两态头宽 462 vs 572（差 24%）：
    切到生气时头像突然变大。改用头宽后差 0px。
-3. **两态必须同画布、且主体锚定右下角。** 挂件是 `object-fit:contain` +
+3. **各状态同画布、且主体锚定右下角。** 挂件是 `object-fit:contain` +
    `object-position:right bottom`：画布尺寸决定缩放比，主体相对右下角的位置决定落点。
    两者任一不同，切换就会跳。脚本结尾会断言「头宽一致 + 右下角一致」，不通过直接报错。
+4. **画布高恒等于 idle，状态比它高的从底部裁。** 画布一旦被某个状态撑高，挂件 contain
+   的缩放比就变了 —— normal（角色图 983×1026）↔情绪 切换时整个角色会缩小。
+   实测踩过：gpt 的吃醋/伤心是**全身构图**（头归一化后 1126/1215px > idle 1026），
+   按最大值撑画布会变成 996×1215，情绪态比待机小 15%。脚本现在把高出的部分**从底部裁掉**
+   （头顶保持上沿，裁掉的只有躯干下摆，取景与半身像一致）。
 
 **另外两条与去黑底有关**：
 
@@ -101,9 +106,9 @@ python tools/make-mood-sprites.py --ref pet-app/assets/ds-whale.png \
   这是剔气泡的必然代价（实测两张生气原图各损失 72110 px，位置完全一致）—— 换图后若发现
   犄角顶部被切平，先确认是不是原图里角色本来就伸进了气泡区域。
 
-`tools/verify-fork.mjs` 的「情绪素材几何一致」检查会独立复核这三条（**纯 JS 解码 PNG
-像素**，不依赖 Python），并在输出里直接给出头宽与右边距，便于一眼看出偏了多少。
-多态素材（`jealous` / `sad`…）**存在就一起验**，不存在不算错。
+`tools/verify-fork.mjs` 的「情绪素材几何一致」检查会独立复核这些（**纯 JS 解码 PNG
+像素**，不依赖 Python），并在输出里直接给出头宽与右边距，便于一眼看出偏了多少；
+两位在场角色的**四态文件缺一不可**（「情绪素材」检查逐个断言存在 + 同尺寸）。
 
 脚本本身在结尾会断言「头宽一致 + 主体右下角一致」，任一条不过直接报错退出 ——
 所以"看起来没裁剪好"这类问题会在生成阶段就拦下来，不会带到挂件上。
@@ -111,6 +116,10 @@ python tools/make-mood-sprites.py --ref pet-app/assets/ds-whale.png \
 ## 聊天选项 + 吃醋
 
 她在挑时候弹出 **3 个可点的选项**；你选哪个，她怎么回由 `presets/talk.json` 决定。
+
+> **情绪按角色各记各的**（`config.moods = { [roleId]: 情绪槽 }`）：gpt娘 生气不会跟着
+> 小鲸鱼一起气，点她攒的档位也只记她名下。旧的单条全局 `mood` 第一次读到会自动迁到
+> 当前角色名下，之后只读写 `moods`（`mood` 留在白名单里只为导入老备份）。
 
 **什么时候弹**
 
@@ -157,6 +166,25 @@ token 一次性 —— 连点同一条不会连着降两次情绪。
 门禁把 `maxOptionChars ≤ 12` 钉死；实机验证方式是：起一份 `pet-app` 副本，用 headless 浏览器
 截图看选项泡 —— 四条内容（1 句开场 + 3 个选项）必须都在白色气泡里。
 
+## 切换惩罚（没打招呼就切走）
+
+**没打招呼就切到别的 AI 娘 → 被甩下的那位立刻吃醋或伤心**（2026-10-07 用户定稿）。
+她记住你的方式有三种，参数全在 `presets/talk.json` 的 `switchAway`（改完热重载生效）：
+
+| 阶段 | 发生什么 | 参数（默认） |
+|---|---|---|
+| 你切走的瞬间 | 被甩下的那位：**吃醋或伤心**（随机各半），持续 holdMs | `holdMs` 120000 / `sadChance` 0.5 |
+| 同上，概率附加 | 她直接**从角色列表里消失**：置灰 + 红色倒计时「躲起来 Ns」，**这期间你切不回她** | `hideChance` 0.4 / `hideMinMs` 60000 / `hideMaxMs` 180000（**3 分钟硬上限**，宿主夹死） |
+| 你切回来时 | 她还在气头上 → **交互锁**：点她、拖她她一律装聋（☰按钮和右键菜单不受影响，不会把你锁死） | `lockMs` 60000（0 = 不锁） |
+| 情绪自然过点后 | 正常对待：不锁、不躲 | `holdMs` 到期即止 |
+
+- 交互锁/躲藏都是**绝对时间戳**，重启后继续算（不会白送时长）。
+- **情绪过点了再切回来就不锁** —— 只锁"还气着"的那阵子（冒烟测试对此有专门用例）。
+- 躲藏中的角色由宿主在 `PUT role-current` 时拒绝（`{ok:false,hidden:true}`），前端回退；
+  角色面板同时置灰 + 走字倒计时，到点自动恢复可点。
+- 想关掉整条惩罚：`switchAway.enabled=false`，或把 `holdMs` 设 0（宿主一个字段都不写）。
+- 全套行为有冒烟用例：按角色独立 / 锁 / 情绪过点不锁 / 躲藏拒绝与恢复。
+
 ## 自定义 LLM（可选）
 
 不配就全部用 `presets/talk.json` 的预设。配了则让**你自己的模型**按人设现场生成选项与她的回话
@@ -169,6 +197,8 @@ token 一次性 —— 连点同一条不会连着降两次情绪。
   只在控制台留一行 warn，并在响应里把 `source` 标成 `'preset'` —— 功能永远可用。
 - 人设与提示词写在 `presets/talk.json` 的 `llmPrompt`（`system` / `open` / `react`，含占位符），
   **代码里不写人设文案**。
+- 设置页里 **baseUrl 与模型名是明文显示**的（只有 API Key 遮蔽）—— 地址和模型名不是密钥，
+  打成点反而难核对填没填对。
 - ⚠️ baseUrl 会收到你的 Key：只填你自己信任的地址。设置页也写了这一句。
 - 「测试连接」按钮走 `/pet-test-llm`，用输入框里的值真发一次请求，把样例选项直接显示出来。
 

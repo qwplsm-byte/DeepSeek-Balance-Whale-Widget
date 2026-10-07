@@ -20,7 +20,11 @@
     "",
     "已知取舍（本次不做）：options 与 rivals 是**全局一份**、按 gpt娘 视角写的 —— 所以切到小鲸鱼时，",
     "「DeepSeek 懂我」这类选项也会让她吃醋（DeepSeek 其实是她自己的模型）。要给每个角色独立选项池，",
-    "就把 options / rivals / opening 按角色 id 拆成对象（host 的 talkSpec() 是角色无关读取，只改这里）。"
+    "就把 options / rivals / opening 按角色 id 拆成对象（host 的 talkSpec() 是角色无关读取，只改这里）。",
+    "",
+    "切换惩罚（switchAway，2026-10-07 追加）：没打招呼就切到别的 AI 娘 → 被甩下的那位吃醋或伤心，",
+    "切回来时她还气着就对你装聋（点不动、拖不动），或者更狠的——直接躲起来最多 3 分钟，让你切不回她。",
+    "情绪本身按**角色**各记各的（config.moods），gpt娘 生气不会传染给小鲸鱼。"
   ],
   "version": 1,
   "talk": {
@@ -33,6 +37,23 @@
     "maxOptionChars": 10,
     "maxLineChars": 60,
     "maxLines": 4,
+    "switchAway": {
+      "_说明": [
+        "切换惩罚（宿主 presets 热重载即生效）：",
+        "  holdMs   = 被甩下的情绪持续毫秒（默认 2 分钟）",
+        "  sadChance= 伤心的概率（0=永远吃醋，1=永远伤心）",
+        "  lockMs   = 你切回来时她还气着 → 对你装聋的时长（点她/拖她都不理）；0=不锁",
+        "  hideChance / hideMinMs / hideMaxMs = 概率躲起来多久（此间角色列表置灰、切不回她）；",
+        "    hideMaxMs 的 3 分钟是用户定的硬上限，宿主按 180000 夹死，改这里也超不过去"
+      ],
+      "enabled": true,
+      "sadChance": 0.5,
+      "holdMs": 120000,
+      "lockMs": 60000,
+      "hideChance": 0.4,
+      "hideMinMs": 60000,
+      "hideMaxMs": 180000
+    },
     "opening": {
       "pending": [
         { "t": "……等一下，我组织一下语言", "w": 10 }

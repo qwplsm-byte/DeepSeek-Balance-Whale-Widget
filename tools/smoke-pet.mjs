@@ -50,6 +50,20 @@ for (const f of fs.readdirSync(path.join(PET, MOOD_DIR))) {
   fs.copyFileSync(path.join(PET, MOOD_DIR, f), path.join(tmp, MOOD_DIR, f))
 }
 
+// —— 切换惩罚（presets/talk.json 的 switchAway）在冒烟里默认调成"无副作用" ——
+// 否则用例之间每一次 role-current 都会给被甩下的角色写情绪/躲藏，污染后续断言。
+// 需要测惩罚的用例用 patchSwitchAway({...}) 动态打开，GET /dsh-whale/reload 立即生效。
+const TALK_FILE = path.join(tmp, 'presets', 'talk.json')
+function patchSwitchAway(sa) {
+  const t = JSON.parse(fs.readFileSync(TALK_FILE, 'utf8'))
+  t.talk.switchAway = Object.assign({
+    enabled: true, sadChance: 1, holdMs: 0, lockMs: 0,
+    hideChance: 0, hideMinMs: 1000, hideMaxMs: 1000,
+  }, sa || {})
+  fs.writeFileSync(TALK_FILE, JSON.stringify(t, null, 2))
+}
+patchSwitchAway({})
+
 const require = createRequire(import.meta.url)
 const pet = require(path.join(tmp, 'server.js'))
 
@@ -266,16 +280,20 @@ try {
 
   await step('情绪：已落盘 config.json（重启后仍在生气）', async () => {
     const cfg = pet.readConfig()
-    assert(cfg.mood && cfg.mood.state === 'angry', 'config.mood=' + JSON.stringify(cfg.mood))
-    assert(cfg.mood.until > Date.now(), 'until 不是未来时间戳')
-    return 'until=+' + Math.round((cfg.mood.until - Date.now()) / 1000) + 's level=' + cfg.mood.level
+    const slot = cfg.moods && cfg.moods.default   // 情绪按角色各记各的，这一段测的是当前角色 default
+    assert(slot && slot.state === 'angry', 'config.moods.default=' + JSON.stringify(slot))
+    assert(slot.until > Date.now(), 'until 不是未来时间戳')
+    return 'until=+' + Math.round((slot.until - Date.now()) / 1000) + 's level=' + slot.level
   })
 
   await step('情绪：到点自动消气并写回 config', async () => {
-    pet.writeConfig({ mood: { state: 'angry', until: Date.now() - 1000, level: 2 } })
+    // 直接把当前角色的槽改成"已过期"，模拟时间流逝（绝对时间戳口径，重启也这么算）
+    const moods = Object.assign({}, pet.readConfig().moods)
+    moods.default = { state: 'angry', until: Date.now() - 1000, level: 2, by: 'click', lockUntil: 0, hideUntil: 0 }
+    pet.writeConfig({ moods })
     const m = await getJson('/dsh-whale/mood.json')
     assert(m.body.state === 'normal', 'state=' + m.body.state)
-    assert(pet.readConfig().mood.state === 'normal', '未写回 normal')
+    assert(pet.readConfig().moods.default.state === 'normal', '未写回 normal')
     return 'state=normal'
   })
 
@@ -314,16 +332,20 @@ try {
     return '未延长'
   })
 
-  await step('情绪：mood 字段在配置白名单内（可随备份走）', async () => {
+  await step('情绪：moods（按角色）在配置白名单内（可随备份走）', async () => {
     const r = await getJson('/pet-backup.json')
-    assert(r.body.config.mood, '备份里没有 mood')
-    return 'mood.state=' + r.body.config.mood.state
+    const moods = r.body.config.moods
+    assert(moods && typeof moods === 'object', '备份里没有 moods')
+    // 当前角色是 default，且刚在它身上点出生气 → 应记在 default 名下（按角色独立）
+    assert(moods.default && moods.default.state === 'angry', 'moods.default 不是 angry：' + JSON.stringify(moods))
+    return 'moods.default=' + JSON.stringify(moods.default)
   })
 
-  await step('情绪：小鲸鱼也有成套素材（切到 whale 后生气图不同）', async () => {
+  await step('情绪：小鲸鱼也有成套素材（两角色各点各的生气，台词各用各的池）', async () => {
     resetMood()
-    // 切到小鲸鱼
+    // 切到小鲸鱼（此刻无情绪 → idle 图）
     await post('/dsh-whale/role-current.json', { id: 'whale' })
+    resetMood()
     const idleImg = Buffer.from(await (await fetch(base + '/dsh-whale/mood-image.png')).arrayBuffer())
     // 点满 25 次 → 生气
     for (let i = 0; i < 25; i++) await click()
@@ -331,14 +353,17 @@ try {
     assert(!idleImg.equals(angryImg), '小鲸鱼生气前后拿到的图相同（说明没有成套素材）')
     const b = await getJson('/dsh-whale/bubble.json')
     assert(b.body.source === 'angry', 'source=' + b.body.source)
-    // 小鲸鱼的生气台词应当来自 whaleAngry 池
     const line = b.body.config.items[0].modules[0].lines[0].t
     assert(typeof line === 'string' && line.length, '生气台词为空')
-    // 切回 gpt娘，确认两角色台词池不同
+    // 切回 gpt娘，**它自己点出生气**（情绪按角色各记各的 —— 不能靠继承 whale 的生气）
     await post('/dsh-whale/role-current.json', { id: 'default' })
+    resetMood()
+    for (let i = 0; i < 25; i++) await click()
     const b2 = await getJson('/dsh-whale/bubble.json')
+    assert(b2.body.source === 'angry', 'gpt娘 自己点出的生气没生效：' + b2.body.source)
     const line2 = b2.body.config.items[0].modules[0].lines[0].t
     assert(line !== line2, '两角色生气台词相同（应当各用各的池）：' + line)
+    resetMood()
     return 'whale: ' + line + ' / gpt: ' + line2
   })
 
@@ -616,6 +641,114 @@ try {
     pet.resetMoodState()
     return 'hasKey=true / 默认剔除 / secret.llm ✓'
   })
+
+  // ==========================================================================
+  // 按角色独立的情绪 + 切换惩罚（2026-10-07 用户定稿）
+  //   · 每人一格：gpt娘 生气不跟着小鲸鱼一起气
+  //   · 没打招呼切走 → 被甩下的那位吃醋/伤心（+ 概率躲藏）
+  //   · 切回来还气着 → 交互锁（点她/拖她她都不理）；情绪过点回来 → 正常对待
+  //   · 躲藏中的角色切不回去（hidden 拒绝），到点自动恢复
+  // ==========================================================================
+  await step('情绪按角色独立：whale 生气不传染给 gpt娘', async () => {
+    await post('/dsh-whale/role-current.json', { id: 'default' })
+    pet.resetMoodState()
+    await post('/dsh-whale/role-current.json', { id: 'whale' })
+    pet.resetMoodState()                    // 切换惩罚会写 default，清掉避免干扰
+    for (let i = 0; i < 25; i++) await click()
+    const w = (await getJson('/dsh-whale/mood.json')).body
+    assert(w.state === 'angry', 'whale 应生气，实际 ' + w.state)
+    await post('/dsh-whale/role-current.json', { id: 'default' })
+    const g = (await getJson('/dsh-whale/mood.json')).body
+    assert(g.state !== 'angry', 'gpt娘 继承了 whale 的生气（按角色独立被破坏）：' + g.state)
+    // whale 自己那格还留着生气（切换惩罚在冒烟里是关的）—— 证明是"两格各记各的"，不是共享一份
+    const wSlot = pet.moodSlot('whale')
+    assert(wSlot && wSlot.state === 'angry', 'whale 的情绪槽丢了/被改了：' + JSON.stringify(wSlot))
+    pet.resetMoodState()
+    return 'whale=angry → 切走 → gpt娘=' + g.state + '（whale 槽仍=angry ✓）'
+  })
+
+  await step('切换惩罚：切回来还气着 → 上交互锁（lockUntil 在未来）', async () => {
+    await post('/dsh-whale/role-current.json', { id: 'default' })
+    pet.resetMoodState()
+    patchSwitchAway({ holdMs: 8000, lockMs: 5000, sadChance: 1, hideChance: 0 })
+    await getJson('/dsh-whale/reload')
+    const r1 = await post('/dsh-whale/role-current.json', { id: 'whale' })
+    assert(r1.body.ok === true, '切到 whale 失败：' + JSON.stringify(r1.body))
+    const dSlot = pet.moodSlot('default')
+    assert(dSlot && dSlot.state === 'sad' && dSlot.by === 'switch', '被甩下的 default 槽位不对：' + JSON.stringify(dSlot))
+    const r2 = await post('/dsh-whale/role-current.json', { id: 'default' })
+    assert(r2.body.ok === true, '切回 default 失败：' + JSON.stringify(r2.body))
+    assert(r2.body.lockUntil > Date.now(), '切回来没上交互锁：' + JSON.stringify(r2.body))
+    const m = (await getJson('/dsh-whale/mood.json')).body
+    assert(m.state === 'sad' && m.lockUntil > Date.now(), 'mood.json 没带状态/锁：' + JSON.stringify(m))
+    pet.resetMoodState()
+    patchSwitchAway({})
+    await getJson('/dsh-whale/reload')
+    return '锁 ' + Math.round((r2.body.lockUntil - Date.now()) / 1000) + 's / 情绪=sad ✓'
+  })
+
+  await step('切换惩罚：情绪过点再切回来 → 不锁（只锁还气着的）', async () => {
+    await post('/dsh-whale/role-current.json', { id: 'default' })
+    pet.resetMoodState()
+    patchSwitchAway({ holdMs: 1000, lockMs: 5000, sadChance: 1, hideChance: 0 })
+    await getJson('/dsh-whale/reload')
+    await post('/dsh-whale/role-current.json', { id: 'whale' })   // 甩下 default（1 秒）
+    await new Promise((r) => setTimeout(r, 1300))
+    const r = await post('/dsh-whale/role-current.json', { id: 'default' })
+    assert(r.body.ok === true, '切回 default 失败：' + JSON.stringify(r.body))
+    assert(!(r.body.lockUntil > Date.now()), '情绪早过了还上锁：' + JSON.stringify(r.body))
+    pet.resetMoodState()
+    patchSwitchAway({})
+    await getJson('/dsh-whale/reload')
+    return '未上锁 ✓'
+  })
+
+  await step('切换惩罚：躲藏中的角色切不回去（hidden 拒绝 → 到点恢复）', async () => {
+    await post('/dsh-whale/role-current.json', { id: 'default' })
+    pet.resetMoodState()
+    patchSwitchAway({ holdMs: 60000, lockMs: 0, hideChance: 1, hideMinMs: 3000, hideMaxMs: 3000, sadChance: 1 })
+    await getJson('/dsh-whale/reload')
+    await post('/dsh-whale/role-current.json', { id: 'whale' })   // 甩下 default，且必躲 3s
+    const roles = (await getJson('/dsh-whale/roles.json')).body.roles
+    const d = roles.find((x) => x.id === 'default')
+    assert(d && d.hideUntil > Date.now(), 'roles.json 没带躲藏标记：' + JSON.stringify(d))
+    assert(d.moodState === 'sad', 'roles.json 没带情绪：' + JSON.stringify(d))
+    const refused = await post('/dsh-whale/role-current.json', { id: 'default' })
+    assert(refused.body.ok === false && refused.body.hidden === true, '躲着居然切回去了：' + JSON.stringify(refused.body))
+    assert(pet.readConfig().role === 'whale', '拒绝切换后 role 被改了：' + pet.readConfig().role)
+    await new Promise((r) => setTimeout(r, 3300))
+    const back = await post('/dsh-whale/role-current.json', { id: 'default' })
+    assert(back.body.ok === true, '倒计时结束还切不回：' + JSON.stringify(back.body))
+    pet.resetMoodState()
+    patchSwitchAway({})
+    await getJson('/dsh-whale/reload')
+    return '躲 3s → 拒绝 → 到点恢复 ✓'
+  })
+
+  await step('告别：farewell:true 的切换不写吃醋/伤心/躲藏，未告别照常惩罚', async () => {
+    await post('/dsh-whale/role-current.json', { id: 'default' })
+    pet.resetMoodState()
+    patchSwitchAway({ holdMs: 60000, lockMs: 0, sadChance: 1, hideChance: 1, hideMinMs: 2000, hideMaxMs: 2000 })
+    await getJson('/dsh-whale/reload')
+    const bye = await post('/dsh-whale/role-current.json', { id: 'whale', farewell: true })
+    assert(bye.body.ok === true, '告别切换失败：' + JSON.stringify(bye.body))
+    const dSlot = pet.moodSlot('default')
+    assert(!dSlot || dSlot.state !== 'sad', '告别后仍给被甩下的写情绪：' + JSON.stringify(dSlot))
+    const roles = (await getJson('/dsh-whale/roles.json')).body.roles
+    const d = roles.find((x) => x.id === 'default')
+    assert(!(d && d.hideUntil > Date.now()), '告别后还是躲藏了：' + JSON.stringify(d))
+    // 对照组：没告别切走 → 惩罚照常（sadChance 1 必中）
+    await post('/dsh-whale/role-current.json', { id: 'default' })
+    pet.resetMoodState()
+    await post('/dsh-whale/role-current.json', { id: 'whale' })
+    const d2 = pet.moodSlot('default')
+    assert(d2 && d2.state === 'sad' && d2.by === 'switch', '没告别却没惩罚：' + JSON.stringify(d2))
+    pet.resetMoodState()
+    patchSwitchAway({})
+    await getJson('/dsh-whale/reload')
+    return 'farewell 跳过 / 未告别照常 ✓'
+  })
+
 } catch (err) {
   failed++
   results.push('  ✗ 启动失败：' + ((err && err.message) || err))

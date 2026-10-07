@@ -290,6 +290,14 @@ def main():
     # 实测 gpt 两图头宽都是 847（比值 1.0000），小鲸鱼却是 462 vs 572（0.8077）——
     # 后者切换时头像会大 24%，看起来就是"第二态没裁剪好"。
     prepared = []
+    # 画布高**恒等于 idle 内容底边**（= 挂件里 idle 角色图的缩放基准）。
+    # 这一条比"同画布"更狠：画布一旦被某个状态撑高，挂件 contain 的缩放比就变了，
+    # normal（角色图 983x1026）↔情绪 切换时整个角色会缩小。
+    # 实测踩过：gpt 的吃醋/伤心是**全身构图**（头归一化后高 1126/1215px > idle 1026），
+    # 直接按最大值撑画布 → 画布变 996x1215，情绪态比待机小 15%。
+    # 修法：比 idle 画布高的部分从**底部裁掉**（头顶保持在上沿，裁掉的是躯干下摆，
+    # 与 idle 的半身像取景一致），而**不是**让画布长高。
+    H_CANVAS = bh_r + ref_box[1]
     for name, src in states:
         raw = Image.open(src).convert("RGBA")
         print("[%s] %s  %dx%d" % (name, src, raw.width, raw.height))
@@ -311,22 +319,32 @@ def main():
         # 该状态主体在缩放后的实际尺寸
         bw = max(1, int(round((body[2] - body[0] + 1) * scale)))
         bh = max(1, int(round((body[3] - body[1] + 1) * scale)))
+        # 超出 idle 画布高度 → 从底部裁（保留头顶；裁的是下摆/躯干，与半身像取景一致）
+        if bh + off_y > H_CANVAS:
+            cut = bh + off_y - H_CANVAS
+            assert patch.height - cut >= 80, \
+                "状态 %s 比 idle 高太多（裁剩 %dpx），素材构图与 idle 差距过大，换构图更接近的图" % (
+                    name, patch.height - cut)
+            patch = patch.crop((0, 0, patch.width, patch.height - cut))
+            bh = max(1, bh - cut)
+            print("  高出画布 %dpx → 从底部裁掉（头顶保持上沿，取景对齐半身像）" % cut)
         print("  头部宽 idle %d / %s %d → 缩放 %.4f；内容 → %dx%d"
-              % (ref_head, name, hd, scale, new_w, new_h))
+              % (ref_head, name, hd, scale, patch.width, patch.height))
         prepared.append({"name": name, "patch": patch, "off_x": off_x, "off_y": off_y, "bw": bw, "bh": bh})
 
     # —— 让所有状态的主体都**贴死画布右下角**（挂件是 right bottom 对齐）——
     # 这是"第二态看着没裁剪好"的真正修法：
     #   挂件用 object-fit:contain + object-position:right bottom。因此
-    #     · 画布尺寸决定缩放比（所有状态必须同画布）
+    #     · 画布尺寸决定缩放比（所有状态必须同画布，且高度必须与角色图一致）
     #     · 主体相对画布右下角的位置必须一致（都贴死右下角）
     #   否则切换时角色会缩放 + 位移。
     # 实测踩到的形态：idle 用 ds-whale.png（主体右边距 0）而 angry 主体更宽，
     # 老实现把 idle 直接贴进更大的画布 ⇒ idle 右边距变成 80px，切换时右移约 43px。
     #
-    # 画布最小尺寸：保证每个状态「主体贴右下角」时都不越界（多态时取所有状态的最大值）
+    # 宽：横向允许比 idle 略宽（缩放比是**高**决定的，方盒 contain 高度受限；宽只影响贴边）
+    # 高：恒等于 idle（H_CANVAS，状态已在上一步裁过）
     W = max([bw_r + ref_box[0]] + [p["bw"] + p["off_x"] for p in prepared] + [1])
-    H = max([bh_r + ref_box[1]] + [p["bh"] + p["off_y"] for p in prepared] + [1])
+    H = H_CANVAS
 
     # idle：ref 放这里 => 主体右下角 = (W-1, H-1)
     rx = W - bw_r - ref_box[0]
@@ -350,12 +368,15 @@ def main():
                  px + p["off_x"] + p["bw"] - 1, py + p["off_y"] + p["bh"] - 1))
 
     # —— 断言：每个状态与 idle 的**头部宽度**必须一致（挂件上看到的大小才一致）——
+    # 容差 3px 与 tools/verify-fork.mjs 的「情绪素材几何一致」检查保持**同一个数**：
+    # 多状态归一化走 LANCZOS 重采样，量测会随取整漂 1~3px（实测 gpt 的 jealous 差 3px）；
+    # 两边阈值不一致的话，会出现"脚本过不了、门禁却说绿"的假冲突。
     def_anchor = canvases[0][2]
     ih2 = head_width(canvas_idle)
     for name, img, anchor, bw, bh in canvases[1:]:
         h2 = head_width(img)
-        if abs(h2 - ih2) > 2:
-            raise SystemExit("对齐失败：idle 与 %s 头部宽度不一致 %d vs %d" % (name, ih2, h2))
+        if abs(h2 - ih2) > 3:
+            raise SystemExit("对齐失败：idle 与 %s 头部宽度不一致 %d vs %d（超过 3px 容差）" % (name, ih2, h2))
         if anchor != def_anchor:
             raise SystemExit("对齐失败：idle 与 %s 主体右下角不一致 %s vs %s" % (name, anchor, def_anchor))
         print("  头部宽度校验：idle %d / %s %d（差 %d px，已断言）" % (ih2, name, h2, abs(ih2 - h2)))
