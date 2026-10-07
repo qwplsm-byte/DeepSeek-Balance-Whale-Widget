@@ -57,33 +57,36 @@ npm run smoke                  # 冒烟：角色、台词、情绪阈值与档�
 | `gpt` | gpt娘（default） | `mood/gpt-idle.png` / `mood/gpt-angry.png` |
 | `whale` | 小鲸鱼（whale） | `mood/whale-idle.png` / `mood/whale-angry.png` |
 
-原图放在 `assets/mood-src/`。两条生成命令：
+原图放在 `assets/mood-src/`。**统一用一条命令**（`--ref` 传运行时真正使用的 idle 图）：
 
 ```bash
-# 两态同源（都是黑底原图 → 同一窗口裁剪）
-python tools/make-mood-sprites.py --idle pet-app/assets/mood-src/idle.jpg \
-                                  --angry pet-app/assets/mood-src/angry.jpg \
-                                  --out-dir pet-app/assets/mood --name gpt
-
-# 待机图已是成品、生气图是新原图（以成品为基准做几何匹配）
-python tools/make-whale-mood.py --idle pet-app/assets/ds-whale.png \
-                                --angry pet-app/assets/mood-src/whale-angry.jpg \
-                                --out-dir pet-app/assets/mood
+python tools/make-mood-sprites.py --ref pet-app/assets/DSniang1.png \
+                                  --angry pet-app/assets/mood-src/angry.jpg --prefix gpt
+python tools/make-mood-sprites.py --ref pet-app/assets/ds-whale.png \
+                                  --angry pet-app/assets/mood-src/whale-angry.jpg --prefix whale
 ```
 
-**两个必须遵守的要点**（都踩过）：
+**三个必须遵守的要点**（都踩过，各对应一次"看起来没裁剪好"）：
 
-1. **裁剪框要自动算，别写死坐标。** 最初写死 `(850,843,…)`，而 843 恰好是角色最顶端 ——
-   呆毛与左角被切掉，成品图顶部边距 = 0。现在脚本先求两态内容的并集再留边距，对画布
-   外溢出的部分补透明画布，保证四周都有留白。`tools/verify-fork.mjs` 会**解码 alpha 通道**
-   断言「不切边」，把这类问题挡在提交前。
-2. **必须在整张原图上剔气泡，最后才裁框。** 先裁框的话，气泡只剩一小段弧线、面积不到
-   阈值就识别不出来 → 角色头顶会挂着半条深蓝弧线、左下留着气泡尾巴圆。
+1. **以「运行时真正使用的 idle 图」为几何基准。** `--ref` 必须是挂件 idle 状态下实际
+   取的那张图（gpt = `DSniang1.png`，whale = `ds-whale.png`）。早先拿 2048 原图当基准，
+   而运行时用的是另一张成品图 —— 两套坐标系没对齐，切换时角色会缩放 + 位移。
+2. **归一化依据用「头部宽度」，不要用身体高度。** 两态姿势不同（idle 紧裁胸像、angry
+   常露出更多肩膀/发尾），身体高度不可比。实测小鲸鱼两态头宽 462 vs 572（差 24%）：
+   切到生气时头像突然变大。改用头宽后差 0px。
+3. **两态必须同画布、且主体锚定右下角。** 挂件是 `object-fit:contain` +
+   `object-position:right bottom`：画布尺寸决定缩放比，主体相对右下角的位置决定落点。
+   两者任一不同，切换就会跳。脚本结尾会断言「头宽一致 + 右下角一致」，不通过直接报错。
 
-另外：生气图里的**怒火标记是悬浮的**（不与角色相连），按红像素占比（实测 0.57–0.84）识别保留；
-气泡尾巴与描边残渣红占比为 0 → 丢弃。
+**另外两条与去黑底有关**：
 
-两个状态必须**同尺寸、主体同位置**，否则切换时会跳位。两条生成脚本都会在结尾断言这一点。
+- **必须在整张原图上剔气泡，最后才裁框。** 先裁框的话，气泡只剩一小段弧线、面积不到
+  阈值就识别不出来 → 角色头顶会挂着半条深蓝弧线、左下留着气泡尾巴圆。
+- 生气图里的**怒火标记是悬浮的**（不与角色相连），按红像素占比（实测 0.57–0.84）识别保留；
+  气泡尾巴与描边残渣红占比为 0 → 丢弃。
+
+`tools/verify-fork.mjs` 的「情绪素材几何一致」检查会独立复核这三条（**纯 JS 解码 PNG
+像素**，不依赖 Python），并在输出里直接给出头宽与右边距，便于一眼看出偏了多少。
 
 ## 热重载
 

@@ -77,12 +77,11 @@ function buildTrayMenu() {
     { label: '设置（API Key / 演示模式 / 开机自启）', click: () => shell.openExternal('http://127.0.0.1:' + port + '/config') },
     { type: 'separator' },
     {
-      // 热重载是自动的（见下方 watchForReload）；这里给一个手动入口，
-      // 用于「自动没触发」（某些网络盘/编辑器原子保存）或想立刻看到效果时。
+      // 热重载是自动的（改 presets/素材/前端都会自动生效，见 watchForReload）。
+      // 这里只留一个手动入口：自动没触发（网络盘/编辑器原子保存）或想立刻看效果时用。
       label: '立即重载（刷新挂件 + 重读预设）',
       click: () => reloadPresetsNow('托盘菜单手动触发'),
     },
-    { label: '重启（进程级，用于改过 server.js）', click: () => relaunchApp('托盘菜单手动触发') },
     { type: 'separator' },
     {
       label: '开机自启',

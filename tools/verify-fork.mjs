@@ -201,76 +201,8 @@ check('上游默认台词队列已同步（bubble-default-whale.json）', () => 
 })
 
 // —— ④ PNG 结构 ——
-/**
- * 解出 8bit RGBA / 调色板 PNG 的 alpha 通道（只支持本项目素材实际会用到的形态：
- * colorType 6 = RGBA，bitDepth 8；以及 colorType 3 = 调色板 + tRNS）。
- * 目的是让「素材是否被切边」能被 CI 断言，而不是靠人放大看。
- */
-function decodePngAlpha(abs) {
+function parsePng(abs) {
   const buf = fs.readFileSync(abs)
-  let off = 8
-  let ihdr = null
-  const idat = []
-  let trns = null
-  let plte = null
-  while (off + 8 <= buf.length) {
-    const len = buf.readUInt32BE(off)
-    const type = buf.toString('ascii', off + 4, off + 8)
-    const data = buf.subarray(off + 8, off + 8 + len)
-    if (type === 'IHDR') {
-      ihdr = {
-        width: data.readUInt32BE(0), height: data.readUInt32BE(4),
-        bitDepth: data[8], colorType: data[9], interlace: data[12],
-      }
-    } else if (type === 'IDAT') idat.push(data)
-    else if (type === 'tRNS') trns = data
-    else if (type === 'PLTE') plte = data
-    else if (type === 'IEND') break
-    off += 12 + len
-  }
-  assert(ihdr, 'IHDR 缺失')
-  assert(!ihdr.interlace, '不支持隔行扫描 PNG（请重新导出为非隔行）')
-  assert(ihdr.bitDepth === 8, '只支持 8bit PNG，实际 ' + ihdr.bitDepth)
-
-  const raw = zlib.inflateSync(Buffer.concat(idat))
-  const { width, height, colorType } = ihdr
-  const bpp = colorType === 6 ? 4 : (colorType === 3 ? 1 : (colorType === 2 ? 3 : 1))
-  const stride = width * bpp
-  const alpha = new Uint8Array(width * height)
-  let prev = Buffer.alloc(stride)
-  let p = 0
-  const paeth = (a, b, c) => {
-    const pp = a + b - c
-    const pa = Math.abs(pp - a), pb = Math.abs(pp - b), pc = Math.abs(pp - c)
-    return (pa <= pb && pa <= pc) ? a : (pb <= pc ? b : c)
-  }
-  for (let y = 0; y < height; y++) {
-    const filter = raw[p++]
-    const line = Buffer.from(raw.subarray(p, p + stride))
-    p += stride
-    for (let i = 0; i < stride; i++) {
-      const a = i >= bpp ? line[i - bpp] : 0
-      const b = prev[i]
-      const c = i >= bpp ? prev[i - bpp] : 0
-      if (filter === 1) line[i] = (line[i] + a) & 0xff
-      else if (filter === 2) line[i] = (line[i] + b) & 0xff
-      else if (filter === 3) line[i] = (line[i] + ((a + b) >> 1)) & 0xff
-      else if (filter === 4) line[i] = (line[i] + paeth(a, b, c)) & 0xff
-    }
-    for (let x = 0; x < width; x++) {
-      if (colorType === 6) alpha[y * width + x] = line[x * 4 + 3]
-      else if (colorType === 3) {
-        const idx = line[x]
-        alpha[y * width + x] = trns && idx < trns.length ? trns[idx] : 255
-      } else alpha[y * width + x] = 255
-    }
-    prev = line
-  }
-  assert(plte || colorType !== 3, 'PLTE 缺失')
-  return alpha
-}
-
-function parsePng(abs) {  const buf = fs.readFileSync(abs)
   const SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
   assert(buf.length > 8 && buf.subarray(0, 8).equals(SIG), 'PNG 签名不匹配')
   const chunks = []
@@ -342,42 +274,167 @@ check('情绪素材（pet-app/assets/mood）', () => {
   return details.join(' / ')
 })
 
-// 情绪素材的「不切边」断言：直接解码 alpha 通道，确认内容四周都有透明留白。
-// 这一条来自真实教训：早先用写死的裁剪窗口 (y=843)，而那恰好是角色最顶端，
-// 于是呆毛尖端与左角被切掉（成品图顶部边距=0），肉眼不放大看不出来。
-check('情绪素材不切边（内容四周必须有透明留白）', () => {
-  const dir = path.join(ROOT, 'pet-app', 'assets', 'mood')
-  const issues = []
-  const oks = []
-  for (const prefix of ['gpt', 'whale']) {
-    for (const state of ['idle', 'angry']) {
-      const f = prefix + '-' + state + '.png'
-      const abs = path.join(dir, f)
-      if (!fs.existsSync(abs)) { issues.push(f + ' 缺失'); continue }
-      const { width, height } = parsePng(abs).ihdr
-      const alpha = decodePngAlpha(abs)
-      let minX = width, minY = height, maxX = -1, maxY = -1
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          if (alpha[y * width + x] > 24) {
-            if (x < minX) minX = x
-            if (y < minY) minY = y
-            if (x > maxX) maxX = x
-            if (y > maxY) maxY = y
-          }
-        }
+// 情绪素材的**几何一致性**断言。
+//
+// 这一条来自两次真实教训：
+//  ① 早先用写死的裁剪窗口 (y=843) —— 那恰好是角色最顶端，呆毛与左角被切。
+//  ② 后来改用「身体高度」归一化，但两态姿势不同、身体高度不可比，
+//     导致小鲸鱼两态**头部宽度 462 vs 572**（差 24%）：切到生气时头像突然变大，
+//     看起来就像"第二态没裁剪好"。
+//
+// 挂件用 object-fit:contain + object-position:right bottom，所以真正决定观感的两个量是：
+//   · 画布尺寸 → 缩放比（两个状态必须同画布，否则缩放比不同）
+//   · 主体相对右下角的位置 → 落点（两态都必须锚在右下角）
+// 而"角色看起来多大"由**头部宽度**决定。下面这三条一起断言，才算真正守住。
+function decodePngLumAlpha(abs) {
+  const buf = fs.readFileSync(abs)
+  let off = 8
+  let ihdr = null
+  const idat = []
+  let trns = null
+  while (off + 8 <= buf.length) {
+    const len = buf.readUInt32BE(off)
+    const type = buf.toString('ascii', off + 4, off + 8)
+    const data = buf.subarray(off + 8, off + 8 + len)
+    if (type === 'IHDR') {
+      ihdr = {
+        width: data.readUInt32BE(0), height: data.readUInt32BE(4),
+        bitDepth: data[8], colorType: data[9], interlace: data[12],
       }
-      if (maxX < 0) { issues.push(f + ' 整张透明'); continue }
-      const margins = [minX, minY, width - 1 - maxX, height - 1 - maxY]
-      if (Math.min(...margins) <= 0) {
-        issues.push(f + ' 有贴边（左,上,右,下 = ' + margins.join(',') + '），角色可能被切')
+    } else if (type === 'IDAT') idat.push(data)
+    else if (type === 'tRNS') trns = data
+    else if (type === 'IEND') break
+    off += 12 + len
+  }
+  assert(ihdr, 'IHDR 缺失')
+  assert(!ihdr.interlace, '不支持隔行扫描 PNG')
+  assert(ihdr.bitDepth === 8, '只支持 8bit PNG')
+  const raw = zlib.inflateSync(Buffer.concat(idat))
+  const { width, height, colorType } = ihdr
+  const bpp = colorType === 6 ? 4 : (colorType === 3 ? 1 : 3)
+  const stride = width * bpp
+  const alpha = new Uint8Array(width * height)
+  const lum = new Uint8Array(width * height)
+  let prev = Buffer.alloc(stride)
+  let p = 0
+  const paeth = (a, b, c) => {
+    const pp = a + b - c
+    const pa = Math.abs(pp - a), pb = Math.abs(pp - b), pc = Math.abs(pp - c)
+    return (pa <= pb && pa <= pc) ? a : (pb <= pc ? b : c)
+  }
+  for (let y = 0; y < height; y++) {
+    const filter = raw[p++]
+    const line = Buffer.from(raw.subarray(p, p + stride))
+    p += stride
+    for (let i = 0; i < stride; i++) {
+      const a = i >= bpp ? line[i - bpp] : 0
+      const b = prev[i]
+      const c = i >= bpp ? prev[i - bpp] : 0
+      if (filter === 1) line[i] = (line[i] + a) & 0xff
+      else if (filter === 2) line[i] = (line[i] + b) & 0xff
+      else if (filter === 3) line[i] = (line[i] + ((a + b) >> 1)) & 0xff
+      else if (filter === 4) line[i] = (line[i] + paeth(a, b, c)) & 0xff
+    }
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x
+      if (colorType === 6) {
+        alpha[i] = line[x * 4 + 3]
+        lum[i] = Math.max(line[x * 4], line[x * 4 + 1], line[x * 4 + 2])
+      } else if (colorType === 3) {
+        const idx = line[x]
+        alpha[i] = trns && idx < trns.length ? trns[idx] : 255
+        lum[i] = 255
       } else {
-        oks.push(f + '[' + margins.join(',') + ']')
+        alpha[i] = 255
+        lum[i] = Math.max(line[x * 3], line[x * 3 + 1], line[x * 3 + 2])
+      }
+    }
+    prev = line
+  }
+  return { width, height, alpha, lum }
+}
+
+function contentBoxOf(img, alphaMin = 8, lumMin = 20) {
+  let minX = img.width, minY = img.height, maxX = -1, maxY = -1
+  for (let y = 0; y < img.height; y++) {
+    for (let x = 0; x < img.width; x++) {
+      const i = y * img.width + x
+      if (img.alpha[i] > alphaMin && img.lum[i] > lumMin) {
+        if (x < minX) minX = x
+        if (y < minY) minY = y
+        if (x > maxX) maxX = x
+        if (y > maxY) maxY = y
       }
     }
   }
+  return maxX < 0 ? null : { minX, minY, maxX, maxY }
+}
+
+/** 头部宽度：内容顶部 38% 高度带内的最大横向跨度（与生成脚本同一算法）。 */
+function headWidthOf(img, box) {
+  const hgt = box.maxY - box.minY + 1
+  const yEnd = Math.min(box.maxY, box.minY + Math.max(1, Math.floor(hgt * 0.38)))
+  let best = 0
+  for (let y = box.minY; y <= yEnd; y++) {
+    let lo = -1, hi = -1
+    for (let x = box.minX; x <= box.maxX; x++) {
+      const i = y * img.width + x
+      if (img.alpha[i] > 8 && img.lum[i] > 20) {
+        if (lo < 0) lo = x
+        hi = x
+      }
+    }
+    if (lo >= 0 && hi - lo + 1 > best) best = hi - lo + 1
+  }
+  return best
+}
+
+check('情绪素材几何一致（同画布 / 头宽一致 / 锚定右下角）', () => {
+  const dir = path.join(ROOT, 'pet-app', 'assets', 'mood')
+  const details = []
+  const issues = []
+  for (const prefix of ['gpt', 'whale']) {
+    const imgs = {}
+    for (const state of ['idle', 'angry']) {
+      const abs = path.join(dir, prefix + '-' + state + '.png')
+      if (!fs.existsSync(abs)) { issues.push(prefix + '-' + state + '.png 缺失'); break }
+      imgs[state] = decodePngLumAlpha(abs)
+    }
+    if (!imgs.idle || !imgs.angry) continue
+
+    // ① 同画布（否则挂件缩放比不同）
+    if (imgs.idle.width !== imgs.angry.width || imgs.idle.height !== imgs.angry.height) {
+      issues.push(prefix + ' 两态画布不一致：' +
+        imgs.idle.width + 'x' + imgs.idle.height + ' vs ' + imgs.angry.width + 'x' + imgs.angry.height)
+      continue
+    }
+    const bi = contentBoxOf(imgs.idle)
+    const ba = contentBoxOf(imgs.angry)
+    if (!bi || !ba) { issues.push(prefix + ' 有一态整张透明'); continue }
+
+    // ② 头宽一致（决定"切到生气时头像会不会突然变大"）
+    const hi = headWidthOf(imgs.idle, bi)
+    const ha = headWidthOf(imgs.angry, ba)
+    if (Math.abs(hi - ha) > 3) {
+      issues.push(prefix + ' 两态头部宽度差 ' + Math.abs(hi - ha) + 'px（' + hi + ' vs ' + ha +
+        '）—— 挂件里切状态时头像会缩放，看起来像"第二态没裁剪好"')
+    }
+
+    // ③ 主体锚定右下角（挂件 right bottom 对齐 ⇒ 落点才一致）
+    const W = imgs.idle.width, H = imgs.idle.height
+    for (const [name, b] of [['idle', bi], ['angry', ba]]) {
+      const mr = W - 1 - b.maxX
+      const mb = H - 1 - b.maxY
+      if (mr > 1 || mb > 1) {
+        issues.push(prefix + '-' + name + ' 未锚定右下角（右边距 ' + mr + ' 下边距 ' + mb +
+          '）—— 两态落点会不同')
+      }
+    }
+    details.push(prefix + ' 画布' + W + 'x' + H + ' 头宽' + hi + '/' + ha +
+      ' 右下角(' + (W - 1 - bi.maxX) + ',' + (H - 1 - bi.maxY) + ')')
+  }
   assert(!issues.length, issues.join('；') + '。重新生成：见 pet-app/README.md 的「情绪素材」一节')
-  return oks.join(' ')
+  return details.join(' / ')
 })
 
 // —— ⑤ 密钥卫生 ——
