@@ -294,6 +294,28 @@ try {
     assert(r.body.config.mood, '备份里没有 mood')
     return 'mood.state=' + r.body.config.mood.state
   })
+
+  await step('情绪：小鲸鱼也有成套素材（切到 whale 后生气图不同）', async () => {
+    resetMood()
+    // 切到小鲸鱼
+    await post('/dsh-whale/role-current.json', { id: 'whale' })
+    const idleImg = Buffer.from(await (await fetch(base + '/dsh-whale/mood-image.png')).arrayBuffer())
+    // 点满 25 次 → 生气
+    for (let i = 0; i < 25; i++) await click()
+    const angryImg = Buffer.from(await (await fetch(base + '/dsh-whale/mood-image.png')).arrayBuffer())
+    assert(!idleImg.equals(angryImg), '小鲸鱼生气前后拿到的图相同（说明没有成套素材）')
+    const b = await getJson('/dsh-whale/bubble.json')
+    assert(b.body.source === 'angry', 'source=' + b.body.source)
+    // 小鲸鱼的生气台词应当来自 whaleAngry 池
+    const line = b.body.config.items[0].modules[0].lines[0].t
+    assert(typeof line === 'string' && line.length, '生气台词为空')
+    // 切回 gpt娘，确认两角色台词池不同
+    await post('/dsh-whale/role-current.json', { id: 'default' })
+    const b2 = await getJson('/dsh-whale/bubble.json')
+    const line2 = b2.body.config.items[0].modules[0].lines[0].t
+    assert(line !== line2, '两角色生气台词相同（应当各用各的池）：' + line)
+    return 'whale: ' + line + ' / gpt: ' + line2
+  })
 } catch (err) {
   failed++
   results.push('  ✗ 启动失败：' + ((err && err.message) || err))

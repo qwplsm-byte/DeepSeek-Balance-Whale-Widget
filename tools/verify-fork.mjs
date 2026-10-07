@@ -137,19 +137,22 @@ check('presets/bubbles.json', () => {
     assert(typeof l.w === 'number' && l.w > 0, '随机台词缺少权重 w：' + l.t)
   }
   assert(data.whaleFallback && data.whaleFallback.items, 'whaleFallback 缺失（上游抽取失败时的兜底）')
-  // 生气台词：三档都必须有（情绪系统 1/2/3 档各取一池）
-  assert(data.gptAngry && typeof data.gptAngry === 'object', 'gptAngry 缺失（情绪系统的生气台词池）')
+  // 生气台词：**每个有情绪的角色**三档都必须有（1/2/3 档各取一池）
+  assert(data.gptAngry && typeof data.gptAngry === 'object', 'gptAngry 缺失（gpt娘的生氣台词池）')
+  assert(data.whaleAngry && typeof data.whaleAngry === 'object', 'whaleAngry 缺失（小鲸鱼的生气台词池）')
   let angryTotal = 0
-  for (const lv of ['1', '2', '3']) {
-    const pool = data.gptAngry[lv]
-    assert(Array.isArray(pool) && pool.length, 'gptAngry["' + lv + '"] 必须是非空数组')
-    for (const l of pool) {
-      assert(typeof l.t === 'string' && l.t, 'gptAngry[' + lv + '] 有台词缺少 t')
-      assert(typeof l.w === 'number' && l.w > 0, 'gptAngry[' + lv + '] 有台词缺少权重 w：' + l.t)
+  for (const [poolName, pool] of [['gptAngry', data.gptAngry], ['whaleAngry', data.whaleAngry]]) {
+    for (const lv of ['1', '2', '3']) {
+      const arr = pool[lv]
+      assert(Array.isArray(arr) && arr.length, poolName + '["' + lv + '"] 必须是非空数组')
+      for (const l of arr) {
+        assert(typeof l.t === 'string' && l.t, poolName + '[' + lv + '] 有台词缺少 t')
+        assert(typeof l.w === 'number' && l.w > 0, poolName + '[' + lv + '] 有台词缺少权重 w：' + l.t)
+      }
+      angryTotal += arr.length
     }
-    angryTotal += pool.length
   }
-  return gpt.items.length + ' 泡 / 台词 ' + lines.length + ' 句 / 生气台词 ' + angryTotal + ' 句（3 档）'
+  return gpt.items.length + ' 泡 / 台词 ' + lines.length + ' 句 / 生气台词 ' + angryTotal + ' 句（两角色×3 档）'
 })
 
 check('上游默认台词队列已同步（bubble-default-whale.json）', () => {
@@ -168,8 +171,76 @@ check('上游默认台词队列已同步（bubble-default-whale.json）', () => 
 })
 
 // —— ④ PNG 结构 ——
-function parsePng(abs) {
+/**
+ * 解出 8bit RGBA / 调色板 PNG 的 alpha 通道（只支持本项目素材实际会用到的形态：
+ * colorType 6 = RGBA，bitDepth 8；以及 colorType 3 = 调色板 + tRNS）。
+ * 目的是让「素材是否被切边」能被 CI 断言，而不是靠人放大看。
+ */
+function decodePngAlpha(abs) {
   const buf = fs.readFileSync(abs)
+  let off = 8
+  let ihdr = null
+  const idat = []
+  let trns = null
+  let plte = null
+  while (off + 8 <= buf.length) {
+    const len = buf.readUInt32BE(off)
+    const type = buf.toString('ascii', off + 4, off + 8)
+    const data = buf.subarray(off + 8, off + 8 + len)
+    if (type === 'IHDR') {
+      ihdr = {
+        width: data.readUInt32BE(0), height: data.readUInt32BE(4),
+        bitDepth: data[8], colorType: data[9], interlace: data[12],
+      }
+    } else if (type === 'IDAT') idat.push(data)
+    else if (type === 'tRNS') trns = data
+    else if (type === 'PLTE') plte = data
+    else if (type === 'IEND') break
+    off += 12 + len
+  }
+  assert(ihdr, 'IHDR 缺失')
+  assert(!ihdr.interlace, '不支持隔行扫描 PNG（请重新导出为非隔行）')
+  assert(ihdr.bitDepth === 8, '只支持 8bit PNG，实际 ' + ihdr.bitDepth)
+
+  const raw = zlib.inflateSync(Buffer.concat(idat))
+  const { width, height, colorType } = ihdr
+  const bpp = colorType === 6 ? 4 : (colorType === 3 ? 1 : (colorType === 2 ? 3 : 1))
+  const stride = width * bpp
+  const alpha = new Uint8Array(width * height)
+  let prev = Buffer.alloc(stride)
+  let p = 0
+  const paeth = (a, b, c) => {
+    const pp = a + b - c
+    const pa = Math.abs(pp - a), pb = Math.abs(pp - b), pc = Math.abs(pp - c)
+    return (pa <= pb && pa <= pc) ? a : (pb <= pc ? b : c)
+  }
+  for (let y = 0; y < height; y++) {
+    const filter = raw[p++]
+    const line = Buffer.from(raw.subarray(p, p + stride))
+    p += stride
+    for (let i = 0; i < stride; i++) {
+      const a = i >= bpp ? line[i - bpp] : 0
+      const b = prev[i]
+      const c = i >= bpp ? prev[i - bpp] : 0
+      if (filter === 1) line[i] = (line[i] + a) & 0xff
+      else if (filter === 2) line[i] = (line[i] + b) & 0xff
+      else if (filter === 3) line[i] = (line[i] + ((a + b) >> 1)) & 0xff
+      else if (filter === 4) line[i] = (line[i] + paeth(a, b, c)) & 0xff
+    }
+    for (let x = 0; x < width; x++) {
+      if (colorType === 6) alpha[y * width + x] = line[x * 4 + 3]
+      else if (colorType === 3) {
+        const idx = line[x]
+        alpha[y * width + x] = trns && idx < trns.length ? trns[idx] : 255
+      } else alpha[y * width + x] = 255
+    }
+    prev = line
+  }
+  assert(plte || colorType !== 3, 'PLTE 缺失')
+  return alpha
+}
+
+function parsePng(abs) {  const buf = fs.readFileSync(abs)
   const SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
   assert(buf.length > 8 && buf.subarray(0, 8).equals(SIG), 'PNG 签名不匹配')
   const chunks = []
@@ -214,23 +285,69 @@ check('角色图 PNG 结构（3 个文件）', () => {
 
 check('情绪素材（pet-app/assets/mood）', () => {
   const dir = path.join(ROOT, 'pet-app', 'assets', 'mood')
-  assert(fs.existsSync(dir), 'pet-app/assets/mood 不存在（情绪系统需要 idle.png / angry.png）')
-  const info = {}
-  for (const f of ['idle.png', 'angry.png']) {
-    const abs = path.join(dir, f)
-    assert(fs.existsSync(abs), '缺少 ' + f + '（生成：python tools/make-mood-sprites.py --idle <原图> --angry <原图>）')
-    const i = parsePng(abs)
-    assert(i.sawIend && i.chunks.includes('IDAT'), f + ' 结构异常')
-    const bad = i.chunks.filter((c) => !PNG_CHUNK_WHITELIST.includes(c))
-    assert(!bad.length, f + ' 含非白名块：' + [...new Set(bad)].join(', '))
-    const hasAlpha = i.ihdr.colorType === 6 || (i.ihdr.colorType === 3 && i.chunks.includes('tRNS'))
-    assert(hasAlpha, f + ' 没有透明通道')
-    info[f] = i.ihdr.width + 'x' + i.ihdr.height
+  assert(fs.existsSync(dir), 'pet-app/assets/mood 不存在（情绪系统需要成套素材）')
+  // 每个有情绪的角色一套：<前缀>-idle.png / <前缀>-angry.png
+  // 前缀来自 presets/roles.json 的角色 id（default → gpt，whale → whale）
+  const EXPECT = { gpt: 'default', whale: 'whale' }
+  const details = []
+  for (const prefix of Object.keys(EXPECT)) {
+    const pair = {}
+    for (const state of ['idle', 'angry']) {
+      const f = prefix + '-' + state + '.png'
+      const abs = path.join(dir, f)
+      assert(fs.existsSync(abs), '缺少 ' + f + '（生成见 pet-app/README.md 的素材管线说明）')
+      const i = parsePng(abs)
+      assert(i.sawIend && i.chunks.includes('IDAT'), f + ' 结构异常')
+      const bad = i.chunks.filter((c) => !PNG_CHUNK_WHITELIST.includes(c))
+      assert(!bad.length, f + ' 含非白名块：' + [...new Set(bad)].join(', '))
+      const hasAlpha = i.ihdr.colorType === 6 || (i.ihdr.colorType === 3 && i.chunks.includes('tRNS'))
+      assert(hasAlpha, f + ' 没有透明通道')
+      pair[state] = i.ihdr.width + 'x' + i.ihdr.height
+    }
+    // 同角色两态必须同尺寸：否则切换时角色会跳位（生成脚本已断言，这里上锁）
+    assert(pair.idle === pair.angry,
+      prefix + ' 的 idle 与 angry 尺寸不一致（' + pair.idle + ' vs ' + pair.angry + '）—— 情绪切换会跳位')
+    details.push(prefix + ' ' + pair.idle)
   }
-  // 两个状态必须同尺寸：否则切换时角色会跳位（生成脚本用固定窗口保证，这里上锁）
-  assert(info['idle.png'] === info['angry.png'],
-    'idle 与 angry 尺寸不一致（' + info['idle.png'] + ' vs ' + info['angry.png'] + '）—— 情绪切换会跳位')
-  return 'idle/angry 均为 ' + info['idle.png']
+  return details.join(' / ')
+})
+
+// 情绪素材的「不切边」断言：直接解码 alpha 通道，确认内容四周都有透明留白。
+// 这一条来自真实教训：早先用写死的裁剪窗口 (y=843)，而那恰好是角色最顶端，
+// 于是呆毛尖端与左角被切掉（成品图顶部边距=0），肉眼不放大看不出来。
+check('情绪素材不切边（内容四周必须有透明留白）', () => {
+  const dir = path.join(ROOT, 'pet-app', 'assets', 'mood')
+  const issues = []
+  const oks = []
+  for (const prefix of ['gpt', 'whale']) {
+    for (const state of ['idle', 'angry']) {
+      const f = prefix + '-' + state + '.png'
+      const abs = path.join(dir, f)
+      if (!fs.existsSync(abs)) { issues.push(f + ' 缺失'); continue }
+      const { width, height } = parsePng(abs).ihdr
+      const alpha = decodePngAlpha(abs)
+      let minX = width, minY = height, maxX = -1, maxY = -1
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          if (alpha[y * width + x] > 24) {
+            if (x < minX) minX = x
+            if (y < minY) minY = y
+            if (x > maxX) maxX = x
+            if (y > maxY) maxY = y
+          }
+        }
+      }
+      if (maxX < 0) { issues.push(f + ' 整张透明'); continue }
+      const margins = [minX, minY, width - 1 - maxX, height - 1 - maxY]
+      if (Math.min(...margins) <= 0) {
+        issues.push(f + ' 有贴边（左,上,右,下 = ' + margins.join(',') + '），角色可能被切')
+      } else {
+        oks.push(f + '[' + margins.join(',') + ']')
+      }
+    }
+  }
+  assert(!issues.length, issues.join('；') + '。重新生成：见 pet-app/README.md 的「情绪素材」一节')
+  return oks.join(' ')
 })
 
 // —— ⑤ 密钥卫生 ——

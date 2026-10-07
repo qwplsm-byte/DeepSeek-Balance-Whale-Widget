@@ -361,12 +361,25 @@ const WHALE_DEFAULT_PRESET = loadPreset('bubble-default-whale.json', null)
 
 function emptyQueue() { return { v: 1, tapAdvance: true, lib: [], items: [] } }
 
+// 情绪素材的文件名前缀：角色 id → pet-app/assets/mood/<前缀>-{idle,angry}.png
+// default（gpt娘）用 gpt 前缀，whale（小鲸鱼）用 whale 前缀。
+// 没登记的角色返回 null，由调用方回退到角色图。
+const MOOD_IMAGE_PREFIX = {
+  default: 'gpt',
+  whale: 'whale',
+}
+function moodImagePrefix(roleId) {
+  return MOOD_IMAGE_PREFIX[roleId] || null
+}
+
 /**
- * 生气台词泡泡：按档位取 presets/bubbles.json 的 gptAngry[level]。
+ * 生气台词泡泡：按档位取 presets/bubbles.json 的生气台词池。
  * 生气期间点角色仍有反应（不装死），但只回这些台词，不再走正常的余额/额度队列。
+ * 台词池按角色分：gptAngry（gpt娘）/ whaleAngry（小鲸鱼）。
  */
 function angryQueue(level) {
-  const pool = (BUBBLES_PRESET.gptAngry || {})[String(level)] || (BUBBLES_PRESET.gptAngry || {})['1']
+  const byRole = currentRoleId() === DEEPSEEK_ROLE_ID ? BUBBLES_PRESET.whaleAngry : BUBBLES_PRESET.gptAngry
+  const pool = (byRole || {})[String(level)] || (byRole || {})['1']
   if (!Array.isArray(pool) || !pool.length) return null
   return {
     v: 1,
@@ -562,14 +575,21 @@ function handle(req, res) {
     })), MIME['.json'])
   }
   if (p === '/dsh-whale/mood-image.png') {
+    // 情绪素材按角色成套：gpt娘 → gpt-{idle,angry}.png，小鲸鱼 → whale-{idle,angry}.png。
+    // 文件名前缀就是 presets/roles.json 里的角色 id（default 用 gpt 前缀，与生成脚本的 --name 对应）。
     const mood = currentMood()
-    if (mood.state === 'angry') {
-      const f = path.join(ASSETS, 'mood', 'angry.png')
-      if (fs.existsSync(f)) return sendFile(res, f)
+    const state = mood.state === 'angry' ? 'angry' : 'idle'
+    const prefix = moodImagePrefix(currentRoleId())
+    const f = path.join(ASSETS, 'mood', prefix + '-' + state + '.png')
+    if (fs.existsSync(f)) return sendFile(res, f)
+    // 该角色没有成套素材 → 回退到它的角色图（等价于"永远待机"，不会 404）
+    const role = PRESET_ROLES.find((r) => r.id === currentRoleId())
+    if (role && role.image && fs.existsSync(path.join(ASSETS, String(role.image)))) {
+      return sendFile(res, path.join(ASSETS, String(role.image)))
     }
     const def = PRESET_ROLES.find((r) => r.id === DEFAULT_ROLE_ID) || PRESET_ROLES[0]
     const candidates = [def && def.image, 'DSniang1.png', 'DSniang02.png'].filter(Boolean)
-    const hit = candidates.map((f) => path.join(ASSETS, String(f))).find((f) => fs.existsSync(f))
+    const hit = candidates.map((x) => path.join(ASSETS, String(x))).find((x) => fs.existsSync(x))
     return hit ? sendFile(res, hit) : send(res, 404, 'image missing')
   }
 

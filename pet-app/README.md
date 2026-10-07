@@ -33,12 +33,13 @@ node server.js       # 只起本地服务，浏览器打开打印的地址即可
 | 文件 | 作用 |
 |---|---|
 | `presets/roles.json` | 角色清单：`id` / `name` / 图片文件名 / 前端取图 URL。加角色只改这里 |
-| `presets/bubbles.json` | 台词队列：`gpt`（gpt娘出厂队列）、`whaleFallback`（小鲸鱼兜底） |
+| `presets/bubbles.json` | 台词队列：`gpt`（gpt娘出厂队列）、`whaleFallback`（小鲸鱼兜底）、`gptAngry` / `whaleAngry`（两角色各自的生气台词，按 1/2/3 档） |
 | `presets/bubble-default-whale.json` | 上游官方默认队列，**由脚本生成，勿手改** |
 
 ```bash
 npm run extract-bubbles        # 从 assets/whale-widget.js 重新抽取上游默认队列
-npm run verify                 # 门禁：两侧前端一致 / 预设同步 / PNG 结构 / Key 未入库
+npm run verify                 # 门禁：两侧前端一致 / 预设同步 / PNG 结构 / 素材不切边 / Key 未入库
+npm run smoke                  # 冒烟：角色、台词、情绪阈值与档位、导出导入
 ```
 
 台词取值优先级：**气泡编辑器存过的** > `presets/bubbles.json` > 上游抽取结果（仅小鲸鱼）。
@@ -46,6 +47,43 @@ npm run verify                 # 门禁：两侧前端一致 / 预设同步 / PN
 > 为什么上游默认队列要构建期抽取：早期实现在运行时读 862 KB 的前端源码做字符串扫描，
 > 上游一改写法就静默降级成"台词变少"，不报错、极难查。现在由 `tools/verify-fork.mjs`
 > 断言"仓库里的快照 == 当前前端抽取结果"，不同步会在 CI 红。
+
+## 情绪素材
+
+每个有情绪的角色一套（`<前缀>-idle.png` / `<前缀>-angry.png`，前缀 = `presets/roles.json` 里的角色 id）：
+
+| 前缀 | 角色 | 文件 |
+|---|---|---|
+| `gpt` | gpt娘（default） | `mood/gpt-idle.png` / `mood/gpt-angry.png` |
+| `whale` | 小鲸鱼（whale） | `mood/whale-idle.png` / `mood/whale-angry.png` |
+
+原图放在 `assets/mood-src/`。两条生成命令：
+
+```bash
+# 两态同源（都是黑底原图 → 同一窗口裁剪）
+python tools/make-mood-sprites.py --idle pet-app/assets/mood-src/idle.jpg \
+                                  --angry pet-app/assets/mood-src/angry.jpg \
+                                  --out-dir pet-app/assets/mood --name gpt
+
+# 待机图已是成品、生气图是新原图（以成品为基准做几何匹配）
+python tools/make-whale-mood.py --idle pet-app/assets/ds-whale.png \
+                                --angry pet-app/assets/mood-src/whale-angry.jpg \
+                                --out-dir pet-app/assets/mood
+```
+
+**两个必须遵守的要点**（都踩过）：
+
+1. **裁剪框要自动算，别写死坐标。** 最初写死 `(850,843,…)`，而 843 恰好是角色最顶端 ——
+   呆毛与左角被切掉，成品图顶部边距 = 0。现在脚本先求两态内容的并集再留边距，对画布
+   外溢出的部分补透明画布，保证四周都有留白。`tools/verify-fork.mjs` 会**解码 alpha 通道**
+   断言「不切边」，把这类问题挡在提交前。
+2. **必须在整张原图上剔气泡，最后才裁框。** 先裁框的话，气泡只剩一小段弧线、面积不到
+   阈值就识别不出来 → 角色头顶会挂着半条深蓝弧线、左下留着气泡尾巴圆。
+
+另外：生气图里的**怒火标记是悬浮的**（不与角色相连），按红像素占比（实测 0.57–0.84）识别保留；
+气泡尾巴与描边残渣红占比为 0 → 丢弃。
+
+两个状态必须**同尺寸、主体同位置**，否则切换时会跳位。两条生成脚本都会在结尾断言这一点。
 
 ## 备份 / 迁移
 
