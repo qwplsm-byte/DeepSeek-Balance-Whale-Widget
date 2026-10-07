@@ -138,7 +138,8 @@ document.getElementById('testds').onclick = function () {
   })
 }
 
-document.getElementById('exp').onclick = function () {  var url = '/pet-backup.json' + (document.getElementById('withkey').checked ? '?includeKey=1' : '')
+document.getElementById('exp').onclick = function () {
+  var url = '/pet-backup.json' + (document.getElementById('withkey').checked ? '?includeKey=1' : '')
   var a = document.createElement('a')
   a.href = url
   a.download = 'dsh-pet-backup.json'
@@ -150,7 +151,9 @@ document.getElementById('exp').onclick = function () {  var url = '/pet-backup.j
 
 document.getElementById('imp').onclick = function () {
   document.getElementById('impfile').click()
-}document.getElementById('impfile').onchange = function (e) {
+}
+
+document.getElementById('impfile').onchange = function (e) {
   var f = e.target.files && e.target.files[0]
   if (!f) return
   var reader = new FileReader()

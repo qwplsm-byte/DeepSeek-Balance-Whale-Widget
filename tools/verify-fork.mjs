@@ -80,6 +80,36 @@ check('语法（4 个前端/宿主脚本）', () => {
   return SYNTAX_FILES.length + ' 个文件通过'
 })
 
+// —— ①b 设置页内联脚本 ——
+// 真实事故：一次编辑把两处换行删掉了，导致 `}` 与下一行 `document...` 连在一起，
+// 整个内联 <script> 语法错误 —— 表现是「测试连接/保存/开机自启点了都没用」，
+// 而且浏览器不报给用户看。这里编译所有内联脚本，并校验 getElementById 的目标都存在。
+check('设置页内联脚本（语法 + 元素引用）', () => {
+  const files = ['pet-app/public/config.html', 'pet-app/public/index.html']
+  const details = []
+  for (const f of files) {
+    const abs = path.join(ROOT, f)
+    if (!fs.existsSync(abs)) continue
+    const html = fs.readFileSync(abs, 'utf8')
+    const ids = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]))
+    const scripts = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)]
+    scripts.forEach((m, i) => {
+      try {
+        new vm.Script(m[1], { filename: f + ' inline#' + (i + 1) })
+      } catch (err) {
+        throw new Error(f + ' 第 ' + (i + 1) + ' 个内联脚本语法错误：' +
+          err.message.replace(/\s+/g, ' ').slice(0, 140) +
+          '　（这类错误会让整页控件全部失效，浏览器不会提示用户）')
+      }
+    })
+    const used = [...new Set([...html.matchAll(/getElementById\('([^']+)'\)/g)].map((m) => m[1]))]
+    const missing = used.filter((u) => !ids.has(u))
+    assert(!missing.length, f + ' 的 getElementById 引用了不存在的 id：' + missing.join(', '))
+    details.push(path.basename(f) + '(' + scripts.length + ' 脚本/' + used.length + ' 引用)')
+  }
+  return details.join(' / ')
+})
+
 // —— ② 前端双副本 ——
 check('前端双副本逐字节一致', () => {
   const bufs = FRONT_COPIES.map((f) => {
