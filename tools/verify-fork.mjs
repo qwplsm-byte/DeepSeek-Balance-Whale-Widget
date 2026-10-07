@@ -151,6 +151,22 @@ check('动作系统（场景自动触发的 CSS 动画）', () => {
   return '呼吸/跳跃/摇头/颤动/摇摆 五动作，钩子与跃迁判断齐全'
 })
 
+check('主动说话接线（前端定时器 + 服务端 chatter 下发）', () => {
+  const front = fs.readFileSync(path.join(ROOT, 'assets', 'whale-widget.js'), 'utf8')
+  assert(front.includes('function chatterSchedule'), '前端缺少 chatterSchedule')
+  assert(front.includes('function chatterTry'), '前端缺少 chatterTry')
+  assert(front.includes("sceneOpen('chatter'"), '前端缺少「主动说话 → sceneOpen」钩子')
+  assert(front.includes('d.chatter'), 'refreshBubbleCfgFromHost 未接收 chatter 配置')
+  assert(front.includes('bubbleRenderModules([{ type: \'random\', lines: pool }])'),
+    '主动说话未走 random 模块渲染')
+  assert(front.includes('chatterSchedule() } catch (err) {}'), '启动时未排班主动说话')
+  const server = fs.readFileSync(path.join(ROOT, 'pet-app', 'server.js'), 'utf8')
+  assert(server.includes('function bubblePayload()'), '服务端缺少 bubblePayload 包装')
+  assert(server.includes('base.chatter'), 'bubblePayload 未下发 chatter')
+  assert(server.includes('不进 config'), 'chatter 没有「不进 config」的设计说明（混进 config 会被编辑器存档固化）')
+  return '前端排班/渲染/接收 + 服务端下发 齐全'
+})
+
 // —— ③ 预设 ——
 check('presets/roles.json', () => {
   const p = path.join(ROOT, 'pet-app', 'presets', 'roles.json')
@@ -201,7 +217,20 @@ check('presets/bubbles.json', () => {
       angryTotal += arr.length
     }
   }
-  return gpt.items.length + ' 泡 / 台词 ' + lines.length + ' 句 / 生气台词 ' + angryTotal + ' 句（两角色×3 档）'
+  // 主动说话（idle chatter）配置结构
+  const ch = data.chatter
+  assert(ch && typeof ch === 'object', 'chatter 缺失（主动说话配置）')
+  assert(typeof ch.enabled === 'boolean', 'chatter.enabled 必须是布尔值')
+  const lo = Number(ch.everyMin), hi = Number(ch.everyMax)
+  assert(Number.isFinite(lo) && lo >= 1, 'chatter.everyMin 必须是 >=1 的数字')
+  assert(Number.isFinite(hi) && hi >= lo, 'chatter.everyMax 必须 >= everyMin')
+  assert(Array.isArray(ch.lines) && ch.lines.length >= 5, 'chatter.lines 至少要有 5 句主动搭话词')
+  for (const l of ch.lines) {
+    assert(typeof l.t === 'string' && l.t, 'chatter 台词缺少 t')
+    assert(typeof l.w === 'number' && l.w > 0, 'chatter 台词缺少权重 w：' + l.t)
+  }
+  return gpt.items.length + ' 泡 / 台词 ' + lines.length + ' 句 / 生气台词 ' + angryTotal +
+    ' 句 / 主动说话 ' + ch.lines.length + ' 句（' + lo + '-' + hi + ' 分钟）'
 })
 
 check('上游默认台词队列已同步（bubble-default-whale.json）', () => {

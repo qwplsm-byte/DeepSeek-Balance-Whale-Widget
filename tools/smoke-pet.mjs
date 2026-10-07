@@ -121,6 +121,27 @@ try {
     return 'source=' + r.body.source + ', ' + r.body.config.items.length + ' 泡'
   })
 
+  await step('主动说话配置随 bubble.json 下发（顶层 chatter，不进 config）', async () => {
+    const r = await getJson('/dsh-whale/bubble.json')
+    const ch = r.body && r.body.chatter
+    assert(ch, '响应缺少 chatter 字段')
+    assert(typeof ch.enabled === 'boolean', 'chatter.enabled 非布尔')
+    assert(Number(ch.everyMin) >= 1 && Number(ch.everyMax) >= Number(ch.everyMin),
+      '间隔非法: ' + ch.everyMin + '-' + ch.everyMax)
+    assert(Array.isArray(ch.lines) && ch.lines.length >= 5, 'chatter.lines 不足 5 句')
+    for (const l of ch.lines) assert(l.t && l.w > 0, 'chatter 台词缺字段')
+    // 关键设计：chatter 绝不能混进 config（否则被编辑器存档固化）
+    assert(!r.body.config.chatter, 'chatter 不应出现在 config 里（会被气泡编辑器固化）')
+    // 切到小鲸鱼也应带 chatter（主动说话与角色无关）
+    await post('/dsh-whale/role-current.json', { id: 'whale' })
+    const r2 = await getJson('/dsh-whale/bubble.json')
+    assert(r2.body.chatter, '小鲸鱼角色下 chatter 丢失')
+    await post('/dsh-whale/role-current.json', { id: 'default' })
+    return ch.enabled
+      ? ('enabled, ' + ch.everyMin + '-' + ch.everyMax + ' 分钟, ' + ch.lines.length + ' 句')
+      : 'disabled'
+  })
+
   await step('切到小鲸鱼后台词换成上游默认队列（source=upstream-extracted）', async () => {
     const put = await getJson('/dsh-whale/role-current.json', {
       method: 'PUT',

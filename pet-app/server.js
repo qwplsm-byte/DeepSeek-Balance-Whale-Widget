@@ -443,7 +443,7 @@ function angryQueue(level) {
   }
 }
 
-function bubblePayload() {
+function bubblePayloadInner() {
   const role = currentRoleId()
   const cfg = readConfig()
   const preset = presetBubbles()
@@ -468,6 +468,24 @@ function bubblePayload() {
   if (cfg.bubbleGpt) return { ok: true, source: 'stored', config: cfg.bubbleGpt }
   if (preset.gpt) return { ok: true, source: 'preset', config: preset.gpt }
   return { ok: true, source: 'empty', config: emptyQueue() }
+}
+
+// 主动说话（idle chatter）配置：顶层字段，**不进 config** ——
+// config 会被气泡编辑器原样保存回存档（bubbleGpt/bubbleWhale），chatter 属于
+// presets 的出厂配置，混进去会被用户存档固化、之后改 presets 就不生效了。
+function bubblePayload() {
+  const base = bubblePayloadInner()
+  const ch = presetBubbles().chatter
+  if (ch && typeof ch === 'object') {
+    base.chatter = {
+      enabled: ch.enabled !== false,
+      everyMin: Number(ch.everyMin) > 0 ? Number(ch.everyMin) : 4,
+      everyMax: Number(ch.everyMax) > 0 ? Number(ch.everyMax) : 9,
+      lines: Array.isArray(ch.lines) ? ch.lines : [],
+    }
+    if (base.chatter.everyMax < base.chatter.everyMin) base.chatter.everyMax = base.chatter.everyMin
+  }
+  return base
 }
 
 function send(res, code, body, type) {

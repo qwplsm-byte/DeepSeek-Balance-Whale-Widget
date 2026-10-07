@@ -8289,6 +8289,13 @@ function refreshBubbleCfgFromHost(cb) {
           bubbleLib = (d.config.lib && Array.isArray(d.config.lib)) ? JSON.parse(JSON.stringify(d.config.lib)) : []
           bubbleTapAdvance = d.config.tapAdvance === true // v727
           try { applyBubbleCfgSeq() } catch (err) {}
+          // custom-pet：主动说话配置（顶层 chatter，不进 config）。变了才重排计时，
+          // 避免每次开气泡编辑器/切角色都把说话节奏打乱。
+          if (d.chatter) {
+            var before = JSON.stringify(chatterCfg)
+            chatterCfg = d.chatter
+            if (JSON.stringify(chatterCfg) !== before) chatterSchedule()
+          }
         }
       })
       .catch(function () {})
@@ -15194,6 +15201,61 @@ function moodTrembleStop() {
   if (moodTrembleTimer) { clearInterval(moodTrembleTimer); moodTrembleTimer = null }
   imgAnimSet('dshwv-a-tremble', false)
 }
+
+// ===== custom-pet：主动说话（idle chatter）=====
+// 每隔 everyMin~everyMax 分钟自动冒一句泡，5s（BUBBLE_MS）后自动收起。
+// 词池 = 队列里 kind=random 的台词（**生气时 bubbleCfg 就是生气池，自动跟着换**）
+//        + presets/bubbles.json 的 chatter.lines（主动搭话专属新词）。
+// 配置由宿主在 /dsh-whale/bubble.json 顶层的 chatter 字段下发（不进 config，
+// 避免被气泡编辑器保存回存档后固化、导致改 presets 不生效）。
+// 已复用现成链路：sceneOpen() 统一开泡 + bubbleRenderModules 渲染 random 模块
+// （模块自带"不连续重复"抽句，不会连着说同一句）。
+var chatterCfg = null
+var chatterTimer = null
+
+function chatterPool() {
+  var pool = []
+  try {
+    var items = (bubbleCfg && bubbleCfg.items) || []
+    for (var i = 0; i < items.length; i++) {
+      var mods = items[i].modules || []
+      for (var j = 0; j < mods.length; j++) {
+        if (mods[j].type === 'random' && Array.isArray(mods[j].lines)) pool = pool.concat(mods[j].lines)
+      }
+    }
+  } catch (err) {}
+  try {
+    if (chatterCfg && Array.isArray(chatterCfg.lines)) pool = pool.concat(chatterCfg.lines)
+  } catch (err) {}
+  return pool
+}
+function chatterDelayMs() {
+  var lo = (chatterCfg && Number(chatterCfg.everyMin) > 0) ? Number(chatterCfg.everyMin) : 4
+  var hi = (chatterCfg && Number(chatterCfg.everyMax) >= lo) ? Number(chatterCfg.everyMax) : lo
+  return Math.round((lo + Math.random() * (hi - lo)) * 60000)
+}
+function chatterSchedule() {
+  try {
+    if (chatterTimer) { clearTimeout(chatterTimer); chatterTimer = null }
+    if (chatterCfg && chatterCfg.enabled === false) return
+    chatterTimer = setTimeout(chatterTry, chatterDelayMs())
+  } catch (err) {}
+}
+function chatterTry() {
+  try {
+    // 占用中（泡泡开着/每轮消耗/菜单开着/拖拽中）→ 60s 后重试，不打断用户
+    if (bubbleShown || costBubbleActive || menuOpen || (drag && drag.active)) {
+      chatterTimer = setTimeout(chatterTry, 60000)
+      return
+    }
+    var pool = chatterPool()
+    if (pool.length) {
+      bubbleRandomLines = null
+      sceneOpen('chatter', function () { bubbleRenderModules([{ type: 'random', lines: pool }]) }, BUBBLE_MS)
+    }
+    chatterSchedule() // 说没说成都排下一班，节奏从"尝试时刻"起算
+  } catch (err) { chatterSchedule() }
+}
 function setAudioBtnText(t) { try { audioGroupBtnLabel.textContent = t } catch (err) {} }
 // 名称悬停循环滚动：仅当文本溢出容器时，悬停到该行后名称无限循环滚动露出全名，
 // 移开停止并回位。双副本无缝循环：滚动距离 = 单份文本+间距，跳回起点时画面相同。
@@ -17248,6 +17310,8 @@ loadRoles()
 try { moodSync(); moodStartPoll() } catch (err) {}
 // custom-pet：动作系统启动 —— 常驻呼吸（其他动作触发时临时接管，结束自动恢复）
 try { imgAnimSet('dshwv-a-breathe', true) } catch (err) {}
+// custom-pet：主动说话启动（先按默认间隔排班；宿主 chatter 配置到达后按实际值重排）
+try { chatterSchedule() } catch (err) {}
 loadAudio()
 // 用量设置(任务结束音/预警/预算)加载,并据此初始化主菜单“任务结束”行
 loadUsageSettings(function () {
