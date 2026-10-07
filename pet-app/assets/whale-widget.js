@@ -15070,7 +15070,7 @@ var menuOpen = false
 var menuClosedAt = 0 // 最近一次关闭菜单的时刻(用于避免"关掉后同一次手势又把它长按打开")
 function toggleMenu() {
   menuOpen = !menuOpen
-  if (menuOpen) positionMenu()
+  if (menuOpen) { positionMenu(); try { syncByeBtn() } catch (err) {} }  // 告别状态打开菜单时刷新（标记可能已被切换消耗）
   menuBox.classList.toggle('dshwv-menu-open', menuOpen)
   if (menuOpen && !menuBtnHide) menuBtn.classList.add('dshwv-menu-btn-visible')
   // 汉堡按钮关闭菜单时同样复位用量子界面(用量态时滑回主菜单态,
