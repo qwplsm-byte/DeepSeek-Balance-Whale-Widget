@@ -1742,15 +1742,17 @@ byeBtn.className = 'dshwv-roleimport'
 function syncByeBtn() {
   var bye = ''
   try { bye = localStorage.getItem('dshw-role-bye') || '' } catch (err) {}
-  var cur = (currentRole && currentRole.id) ? currentRole.id : 'default'
-  byeBtn.textContent = bye === cur ? '已告别' : '告别'
-  byeBtn.title = '打声招呼再走：点击后下次切换角色，她不会吃醋/伤心（对当前角色生效，切走一次后失效）'
+  byeBtn.textContent = bye ? '已告别' : '告别'
+  byeBtn.title = '点一次=告别：下一次切换角色她不会吃醋/伤心；再点一次=取消告别'
 }
 syncByeBtn()
 byeBtn.addEventListener('click', function (e) {
   e.stopPropagation()
-  var cur = (currentRole && currentRole.id) ? currentRole.id : 'default'
-  try { localStorage.setItem('dshw-role-bye', cur) } catch (err) {}
+  // 可开关：已告别时再点一下直接取消（不再依赖切换消耗，状态永远可控）
+  try {
+    if (localStorage.getItem('dshw-role-bye')) localStorage.removeItem('dshw-role-bye')
+    else localStorage.setItem('dshw-role-bye', '1')
+  } catch (err) {}
   syncByeBtn()
 })
 rowBye.appendChild(byeBtn)
@@ -15683,9 +15685,11 @@ function applyRole(id, name, url) {
   var prevRole = null
   try { prevRole = localStorage.getItem('dshw-role') } catch (err) {}
   try { localStorage.setItem('dshw-role', id) } catch (err) {}
-  // 告别标记：告别过、且这次正是**离开那位**（prevRole === 标记）→ 携带 farewell，宿主跳过切换惩罚
+  // 告别标记：点过告别、且这次真的在换角色 → 携带 farewell，宿主跳过切换惩罚
+  // 不再按“告别时的角色”做匹配（localStorage 与 currentRole 可能短暂不同步，匹配失败 = 状态卡死）
   var farewell = false
-  try { farewell = !!prevRole && prevRole !== id && (localStorage.getItem('dshw-role-bye') || '') === prevRole } catch (err) {}
+  try { farewell = !!localStorage.getItem('dshw-role-bye') && prevRole !== id } catch (err) {}
+  if (farewell) { try { localStorage.removeItem('dshw-role-bye') } catch (err) {} }  // 立即消耗，不依赖响应
   // custom-pet：切角色时必须**先清掉上一个角色的余额口径**。
   // 否则从 gpt娘（Codex 百分比，currency='%'）切到小鲸鱼（DeepSeek 人民币）时，
   // 若新角色拿不到数（例如未配 API Key → 宿主回 ok:false/NO_KEY），refresh() 走 error 分支
@@ -15705,11 +15709,10 @@ function applyRole(id, name, url) {
         // 切换被拒（她躲起来了）：本地已按新角色画了图 —— 回退到宿主真正记录的角色
         if (d && d.ok === false && d.hidden && typeof d.id === 'string' && d.id) {
           try { localStorage.setItem('dshw-role', d.id) } catch (err) {}
+          if (farewell) { try { localStorage.setItem('dshw-role-bye', '1') } catch (err) {} }  // 没切成 → 告别还回去
           try { loadRoles() } catch (err) {}   // 找回宿主当前角色并重新 applyRole
           return
         }
-        // 告别已随这次切换消耗掉（没切成/网络失败则留着下次用）
-        if (farewell && d && d.ok !== false) { try { localStorage.removeItem('dshw-role-bye') } catch (err) {} }
         try { refreshBubbleCfgFromHost(function () {}) } catch (err) {}
         try { refresh(false) } catch (err) {}
         // 立刻拿这位角色自己的情绪（含切换惩罚给的交互锁）
