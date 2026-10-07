@@ -16,7 +16,11 @@
     "改反应语气只需改这里；气泡/情绪/素材的取用关系见 pet-app/README.md。",
     "",
     "LLM（可选）：talk.enabled 之外还要在设置页填 llm（OpenAI 兼容端点）。",
-    "llmPrompt 里的人设文案是唯一来源（代码里不写人设）；未配置/超时/返回不合法时全部回落本文件的预设。"
+    "llmPrompt 里的人设文案是唯一来源（代码里不写人设）；未配置/超时/返回不合法时全部回落本文件的预设。",
+    "",
+    "已知取舍（本次不做）：options 与 rivals 是**全局一份**、按 gpt娘 视角写的 —— 所以切到小鲸鱼时，",
+    "「DeepSeek 懂我」这类选项也会让她吃醋（DeepSeek 其实是她自己的模型）。要给每个角色独立选项池，",
+    "就把 options / rivals / opening 按角色 id 拆成对象（host 的 talkSpec() 是角色无关读取，只改这里）。"
   ],
   "version": 1,
   "talk": {
