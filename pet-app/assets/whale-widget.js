@@ -13903,6 +13903,8 @@ function bubblePreviewInto(container, mods, widthPx) {
 //  - 正显示第 1 次点击泡泡:不切换内容,仅重置留存计时
 function whaleClick() {
   try {
+    // custom-pet：点击她 = 重置主动说话窗口（2~5 分钟不点才触发，见 chatterTry）
+    try { chatterSchedule() } catch (err) {}
     if (!bubbleOn) return
     if (bubbleScene && (bubbleScene.kind === 'cost' || bubbleScene.kind === 'alert')) return // 消耗/预警提醒期间点鲸鱼不动作(点泡泡才关)
     if (!bubbleShown) {
@@ -15203,7 +15205,10 @@ function moodTrembleStop() {
 }
 
 // ===== custom-pet：主动说话（idle chatter）=====
-// 每隔 everyMin~everyMax 分钟自动冒一句泡，5s（BUBBLE_MS）后自动收起。
+// 触发语义：**最后一次点击后静默 everyMin~everyMax 分钟即触发**（窗口内随机取点）。
+//   · 点她（whaleClick）→ 重置窗口，重新计时
+//   · 触发时正忙（泡泡开着/每轮消耗/菜单开着/拖拽中）→ 也算被打断，重置窗口、不硬插
+//   · 说完（5s TTL 自动收）→ 排下一个窗口
 // 词池 = 队列里 kind=random 的台词（**生气时 bubbleCfg 就是生气池，自动跟着换**）
 //        + presets/bubbles.json 的 chatter.lines（主动搭话专属新词）。
 // 配置由宿主在 /dsh-whale/bubble.json 顶层的 chatter 字段下发（不进 config，
@@ -15230,7 +15235,8 @@ function chatterPool() {
   return pool
 }
 function chatterDelayMs() {
-  var lo = (chatterCfg && Number(chatterCfg.everyMin) > 0) ? Number(chatterCfg.everyMin) : 4
+  // 每次都重新随机：窗口 = [everyMin, everyMax] 分钟
+  var lo = (chatterCfg && Number(chatterCfg.everyMin) > 0) ? Number(chatterCfg.everyMin) : 2
   var hi = (chatterCfg && Number(chatterCfg.everyMax) >= lo) ? Number(chatterCfg.everyMax) : lo
   return Math.round((lo + Math.random() * (hi - lo)) * 60000)
 }
@@ -15243,9 +15249,9 @@ function chatterSchedule() {
 }
 function chatterTry() {
   try {
-    // 占用中（泡泡开着/每轮消耗/菜单开着/拖拽中）→ 60s 后重试，不打断用户
+    // 触发时正忙 = 静默窗口被打断 → 重置窗口重新计时（不 60s 硬凑）
     if (bubbleShown || costBubbleActive || menuOpen || (drag && drag.active)) {
-      chatterTimer = setTimeout(chatterTry, 60000)
+      chatterSchedule()
       return
     }
     var pool = chatterPool()
@@ -15253,7 +15259,7 @@ function chatterTry() {
       bubbleRandomLines = null
       sceneOpen('chatter', function () { bubbleRenderModules([{ type: 'random', lines: pool }]) }, BUBBLE_MS)
     }
-    chatterSchedule() // 说没说成都排下一班，节奏从"尝试时刻"起算
+    chatterSchedule() // 说完排下一个窗口；没词也照排，避免卡死
   } catch (err) { chatterSchedule() }
 }
 function setAudioBtnText(t) { try { audioGroupBtnLabel.textContent = t } catch (err) {} }

@@ -160,6 +160,11 @@ check('主动说话接线（前端定时器 + 服务端 chatter 下发）', () =
   assert(front.includes('bubbleRenderModules([{ type: \'random\', lines: pool }])'),
     '主动说话未走 random 模块渲染')
   assert(front.includes('chatterSchedule() } catch (err) {}'), '启动时未排班主动说话')
+  // 触发语义：最后一次点击后静默 2~5 分钟才触发 —— 点她必须重置窗口
+  const wc = front.slice(front.indexOf('function whaleClick('), front.indexOf('function whaleClick(') + 400)
+  assert(wc.includes('chatterSchedule()'), 'whaleClick 未重置主动说话窗口（点击后应重新计时）')
+  assert(front.includes('chatterCfg && chatterCfg.enabled === false') || front.includes('chatterCfg.enabled === false'),
+    'chatterSchedule 缺少 enabled 开关判断')
   const server = fs.readFileSync(path.join(ROOT, 'pet-app', 'server.js'), 'utf8')
   assert(server.includes('function bubblePayload()'), '服务端缺少 bubblePayload 包装')
   assert(server.includes('base.chatter'), 'bubblePayload 未下发 chatter')

@@ -13,13 +13,14 @@
   "version": 1,
   "chatter": {
     "_说明": [
-      "主动说话（idle chatter）：每隔 everyMin~everyMax 分钟自动冒一句。",
-      "前端词池 = 队列里 kind=random 的台词（27 句，生气时自动换成对应档生气池）+ 本文件 lines。",
+      "主动说话（idle chatter）：**最后一次点击后静默 everyMin~everyMax 分钟即触发**（间隔在窗口内随机取值）。",
+      "点击她 = 重置窗口重新计时；触发时若正忙（泡泡开着/菜单/拖拽）也重置窗口，不打断用户。",
+      "词池 = 队列里 kind=random 的台词（27 句，生气时自动换成对应档生气池）+ 本文件 lines。",
       "enabled=false 即关闭；改完热重载自动生效（presets 监听会刷新挂件）。"
     ],
     "enabled": true,
-    "everyMin": 4,
-    "everyMax": 9,
+    "everyMin": 2,
+    "everyMax": 5,
     "lines": [
       { "t": "……我只是想说句话", "w": 8 },
       { "t": "看到你了，继续忙你的", "w": 8 },
