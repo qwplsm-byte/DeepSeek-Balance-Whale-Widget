@@ -316,6 +316,65 @@ try {
     assert(line !== line2, '两角色生气台词相同（应当各用各的池）：' + line)
     return 'whale: ' + line + ' / gpt: ' + line2
   })
+
+  // —— 余额口径：两个角色的单位必须可区分（这是真实 bug 的回归测试）——
+  // 症状：从 gpt娘（Codex 百分比）切到小鲸鱼（人民币）时，若新角色读不到数，
+  // 界面会继续显示上一个角色留下的「98 %」——单位不对、数值也不是自己的。
+  // 后端侧要保证：取不到数时**不返回 currency**，让前端没有"旧的 %"可用。
+  await step('余额口径：gpt娘是百分比、小鲸鱼是人民币（单位可区分）', async () => {
+    const savedKey = pet.readConfig().dsKey
+    // 显式置空 Key：用例不能依赖运行环境里是否恰好存过 Key（否则 CI 与开发机会得到不同结果）
+    pet.writeConfig({ dsKey: '' })
+    try {
+      await post('/dsh-whale/role-current.json', { id: 'default' })
+      const g = (await getJson('/dsh-whale/balance.json')).body
+      assert(g.currency === '%', 'gpt娘应为 %，实际 ' + JSON.stringify(g.currency))
+
+      await post('/dsh-whale/role-current.json', { id: 'whale' })
+      const w = (await getJson('/dsh-whale/balance.json')).body
+      // 未配 Key：必须给可读错误，且**不带 currency**
+      //（带 currency 的话，前端会拿上一个角色残留的单位继续显示 —— 这正是那个 bug）
+      assert(w.ok === false, '未配 Key 时不该成功')
+      assert(w.code === 'NO_KEY', '期望 NO_KEY，实际 ' + w.code)
+      assert(w.currency === undefined, '失败响应不应带 currency（否则前端会误用旧单位）')
+      return 'gpt=%、whale=' + w.code + '（失败不带 currency ✓）'
+    } finally {
+      pet.writeConfig({ dsKey: savedKey || '' })
+    }
+  })
+
+  await step('余额口径：配了 Key 时小鲸鱼返回 CNY（不依赖网络成功）', async () => {
+    // 用假 Key：真实 HTTP 请求会失败，但**响应契约**仍必须是「成功才带 currency=CNY，
+    // 失败必须给 code 且不带 currency」——这样前端在任何分支都不会误用 % 单位。
+    const savedKey = pet.readConfig().dsKey
+    pet.writeConfig({ dsKey: 'sk-smoke-invalid' })
+    try {
+      await post('/dsh-whale/role-current.json', { id: 'whale' })
+      const w = (await getJson('/dsh-whale/balance.json')).body
+      if (w.ok) {
+        assert(w.currency === 'CNY', '小鲸鱼成功时应为 CNY，实际 ' + w.currency)
+        return 'currency=CNY total=' + w.totalBalance
+      }
+      assert(['FETCH', 'SHAPE'].includes(w.code), '假 Key 应得 FETCH/SHAPE，实际 ' + w.code)
+      assert(w.currency === undefined, '失败响应不应带 currency')
+      return 'code=' + w.code + '（失败不带 currency ✓）'
+    } finally {
+      pet.writeConfig({ dsKey: savedKey || '' })
+    }
+  })
+
+  await step('设置页「测试连接」：未填 Key 时给出可读错误', async () => {
+    const savedKey = pet.readConfig().dsKey
+    pet.writeConfig({ dsKey: '' })
+    try {
+      const r = await post('/pet-test-ds', { dsKey: '' })
+      assert(r.body.ok === false, '未填 Key 不该成功')
+      assert(r.body.code === 'NO_KEY', '期望 NO_KEY，实际 ' + r.body.code)
+      return 'code=NO_KEY'
+    } finally {
+      pet.writeConfig({ dsKey: savedKey || '' })
+    }
+  })
 } catch (err) {
   failed++
   results.push('  ✗ 启动失败：' + ((err && err.message) || err))

@@ -550,6 +550,42 @@ function handle(req, res) {
     const hit = candidates.map((f) => path.join(ASSETS, String(f))).find((f) => fs.existsSync(f))
     return hit ? sendFile(res, hit) : send(res, 404, 'image missing')
   }
+  // —— 小鲸鱼：测试 DeepSeek Key（设置页「测试连接」用）——
+  // 与 /dsh-whale/balance.json 的区别：强制绕过缓存、不改角色、把原始字段一并回给设置页，
+  // 便于对照「接口返回了什么」与「界面显示了什么」。传入 key 时用传入值（未保存也能试）。
+  if (p === '/pet-test-ds' && req.method === 'POST') {
+    return readBody(req, (body) => {
+      let raw = ''
+      try { const b = JSON.parse(body || '{}'); raw = typeof b.dsKey === 'string' ? b.dsKey.trim() : '' } catch (err) {}
+      const key = raw || String(readConfig().dsKey || '').trim()
+      if (!key) {
+        return send(res, 200, JSON.stringify({ ok: false, code: 'NO_KEY', error: '还没有填 DeepSeek API Key' }), MIME['.json'])
+      }
+      fetchDsBalance(key).then((data) => {
+        const infos = Array.isArray(data && data.balance_infos) ? data.balance_infos : []
+        if (!infos.length) {
+          return send(res, 200, JSON.stringify({
+            ok: false, code: 'SHAPE',
+            error: '接口没有返回 balance_infos（Key 可能无效，或账号没有余额钱包）',
+            raw: JSON.stringify(data).slice(0, 400),
+          }), MIME['.json'])
+        }
+        const pick = infos.find((x) => x && x.currency === 'CNY') || infos[0]
+        send(res, 200, JSON.stringify({
+          ok: true,
+          currency: pick.currency || 'CNY',
+          totalBalance: Number(pick.total_balance),
+          toppedUpBalance: Number(pick.topped_up_balance),
+          grantedBalance: Number(pick.granted_balance),
+          isAvailable: data && data.is_available !== false,
+          wallets: infos.map((x) => ({ currency: x.currency, total: x.total_balance, toppedUp: x.topped_up_balance, granted: x.granted_balance })),
+        }), MIME['.json'])
+      }).catch((err) => {
+        send(res, 200, JSON.stringify({ ok: false, code: 'FETCH', error: String((err && err.message) || err).slice(0, 300) }), MIME['.json'])
+      })
+    })
+  }
+
   if (p === '/dsh-whale/rua.gif') return sendFile(res, path.join(ASSETS, 'rua.gif'))
 
   // —— 情绪系统 ——

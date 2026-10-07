@@ -42,11 +42,17 @@
   </div>
 
   <h2>小鲸鱼 · DeepSeek 余额</h2>
-  <p class="tip">切换到「小鲸鱼」角色时显示。两种口径可选，数据来自 DeepSeek 官方余额接口，Key 只存本机 config.json。</p>
+  <p class="tip">切换到「小鲸鱼」角色时显示。两种口径可选，数据来自 DeepSeek 官方余额接口，Key 只存本机 config.json。
+    <b>「测试连接」</b>会用当前输入框里的 Key 真的请求一次接口，把金额与错误码直接显示出来
+    （不用先保存，也不受缓存影响）。</p>
   <label>DeepSeek API Key</label>
   <input type="password" id="dskey" placeholder="sk-...">
+  <div class="btns" style="margin-top:8px">
+    <button class="ghost" id="testds">测试连接</button>
+  </div>
   <div class="radio"><label style="font-weight:400"><input type="radio" name="dsmode" value="total" checked> 账户总额（充值 + 赠金）</label></div>
   <div class="radio"><label style="font-weight:400"><input type="radio" name="dsmode" value="topup"> 仅充值余额（不含赠金）</label></div>
+  <div id="dsmsg" class="tip" style="margin-top:6px"></div>
 
   <h2>启动</h2>
   <div class="row">
@@ -108,8 +114,31 @@ document.getElementById('save').onclick = function () {
   }).catch(function () { say('保存失败', true) })
 }
 
-document.getElementById('exp').onclick = function () {
-  var url = '/pet-backup.json' + (document.getElementById('withkey').checked ? '?includeKey=1' : '')
+document.getElementById('testds').onclick = function () {
+  var el = document.getElementById('dsmsg')
+  el.textContent = '正在请求 DeepSeek 接口…'
+  el.style.color = '#7a86a8'
+  fetch('/pet-test-ds', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dsKey: document.getElementById('dskey').value }),
+  }).then(function (r) { return r.json() }).then(function (d) {
+    if (d.ok) {
+      el.style.color = '#2f9e44'
+      el.textContent = '连接成功：总额 ' + d.totalBalance + ' ' + d.currency +
+        '（充值 ' + d.toppedUpBalance + ' + 赠金 ' + d.grantedBalance + '）' +
+        (d.isAvailable ? '' : ' ⚠ 账户当前不可用')
+    } else {
+      el.style.color = '#c0392b'
+      el.textContent = '失败 [' + (d.code || '?') + '] ' + (d.error || '') + (d.raw ? ' ｜ 原始：' + d.raw : '')
+    }
+  }).catch(function () {
+    el.style.color = '#c0392b'
+    el.textContent = '请求失败（本地服务没起来？）'
+  })
+}
+
+document.getElementById('exp').onclick = function () {  var url = '/pet-backup.json' + (document.getElementById('withkey').checked ? '?includeKey=1' : '')
   var a = document.createElement('a')
   a.href = url
   a.download = 'dsh-pet-backup.json'
@@ -121,8 +150,7 @@ document.getElementById('exp').onclick = function () {
 
 document.getElementById('imp').onclick = function () {
   document.getElementById('impfile').click()
-}
-document.getElementById('impfile').onchange = function (e) {
+}document.getElementById('impfile').onchange = function (e) {
   var f = e.target.files && e.target.files[0]
   if (!f) return
   var reader = new FileReader()

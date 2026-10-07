@@ -14400,6 +14400,31 @@ function balanceRetryLater() {
   balanceRetryLeft--
   setTimeout(function () { try { refresh(false) } catch (err) {} }, delay)
 }
+// custom-pet：清空「余额口径」相关的全部展示状态。
+// 用途：切换角色时调用 —— 两个角色的额度口径完全不同（gpt娘 = Codex 百分比，
+// 小鲸鱼 = DeepSeek 人民币余额）。若不清空，新角色拿不到数时（宿主回 ok:false）
+// refresh() 的 error 分支不会覆盖 state.balance/currency，界面就会继续显示
+// 上一个角色的数值与单位（实测：切到小鲸鱼后仍显示 gpt娘的「98 %」）。
+function resetBalanceState() {
+  try {
+    state.balance = null
+    state.currency = null
+    state.bonusBalance = null
+    state.rechargeBalance = null
+    state.todayUsage = null
+    state.todayUsageCurrency = 'CNY'
+    state.usageLabel = '本地估算'
+    state.isPeak = false
+    state.peakNextChangeAt = null
+    state.peakHolidays = null
+    state.status = 'loading'
+    state.message = ''
+    shown = null
+    balanceRetryLeft = 2
+    if (animId) { try { cancelAnimationFrame(animId) } catch (err) {} animId = null }
+    render()
+  } catch (err) {}
+}
 function refresh(manual) {
   if (busy) return
   busy = true
@@ -15194,6 +15219,12 @@ function applyRole(id, name, url) {
   currentRole = { id: id, name: name, url: url }
   setRoleBtnText(name)
   try { localStorage.setItem('dshw-role', id) } catch (err) {}
+  // custom-pet：切角色时必须**先清掉上一个角色的余额口径**。
+  // 否则从 gpt娘（Codex 百分比，currency='%'）切到小鲸鱼（DeepSeek 人民币）时，
+  // 若新角色拿不到数（例如未配 API Key → 宿主回 ok:false/NO_KEY），refresh() 走 error 分支
+  // 不改 state.balance/state.currency，界面就会继续显示 gpt娘留下的「98 %」——
+  // 单位是百分比、数值也是别人的（实测就是这个 bug）。
+  resetBalanceState()
   // custom-pet：告知宿主当前角色（独立宠物端按角色切换额度口径/泡泡/记账文案；DSH 端 404 静默忽略）。
   // ⚠️ 必须等 PUT 落地后再拉泡泡/余额：三个请求并发时 GET 可能先到、宿主还按旧角色应答，
   // 表现就是「切完角色首击还是旧口径」（实测踩过）。

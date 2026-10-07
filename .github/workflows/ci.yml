@@ -114,7 +114,14 @@ jobs:
         run: node tools/verify-fork.mjs
 
       # pet-app 冒烟（不需要 Electron）：把 pet-app 复制到临时目录起服务，跑一遍
-      # 角色清单 / 台词队列按角色切换 / 导出导入白名单 / size.json 透传 / 未知端点 404。
+      # 角色清单 / 台词队列按角色切换 / 导出导入白名单 / size.json 透传 / 未知端点 404 /
+      # 情绪阈值与档位 / 余额口径（gpt娘=% 与 小鲸鱼=CNY 必须可区分）。
       # 复制到临时目录是为了不碰开发机上的 pet-app/config.json（那里有 API Key）。
       - name: pet-app smoke
         run: node tools/smoke-pet.mjs
+
+      # 切角色时的口径复位（真实 bug 的回归测试）：
+      # 从 gpt娘（Codex %）切到小鲸鱼（人民币）时，若新角色读不到数，界面曾继续显示
+      # 上一个角色留下的「98 %」——单位不对、数值也不是自己的。
+      - name: Role-switch balance reset
+        run: node tools/test-role-switch-reset.mjs
