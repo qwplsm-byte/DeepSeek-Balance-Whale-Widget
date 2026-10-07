@@ -373,6 +373,20 @@ var css = [
   // 代价是 img 的**矩形**（含透明边距）会吞掉点击 → 由 setupHitTest() 用命中图的**凸包**做 clip-path
   // 裁掉透明区（凸包包含全部不透明像素，不会裁到角色本身），"点到透明处穿透到下层"的行为得以保留。
   '.dshwv-img{position:absolute;right:0;bottom:0;width:59.45%;height:59.45%;display:block;pointer-events:auto;-webkit-user-drag:none;user-select:none;object-fit:contain;object-position:right bottom}',
+ // custom-pet：动作系统（场景自动触发的 CSS 动画）。动画全部挂在 img 上，
+ // 与 body 的按压挤压 SQUISH 分处父子两层、互不冲突；transform-origin 钉在底部中点，
+ // 跳跃/摇头时脚不离地。场景→动作的触发逻辑见 runImgAnim()（JS 侧）。
+ '.dshwv-img{transform-origin:50% 100%}',
+ '@keyframes dshwvBreath{0%,100%{transform:scale(1)}50%{transform:scale(1.014)}}',
+ '.dshwv-img.dshwv-a-breathe{animation:dshwvBreath 4.5s ease-in-out infinite}',
+ '@keyframes dshwvJump{0%{transform:translateY(0) scale(1)}28%{transform:translateY(-14px) scale(1.04)}55%{transform:translateY(0) scale(.975)}78%{transform:translateY(-5px) scale(1.01)}100%{transform:translateY(0) scale(1)}}',
+ '.dshwv-img.dshwv-a-jump{animation:dshwvJump .7s ease-out}',
+ '@keyframes dshwvShake{0%,100%{transform:translateX(0) rotate(0)}18%{transform:translateX(-5px) rotate(-2deg)}36%{transform:translateX(5px) rotate(2deg)}54%{transform:translateX(-4px) rotate(-1.5deg)}72%{transform:translateX(4px) rotate(1.5deg)}88%{transform:translateX(-2px) rotate(-.6deg)}}',
+ '.dshwv-img.dshwv-a-shake{animation:dshwvShake .55s ease-in-out}',
+ '@keyframes dshwvTremble{0%,100%{transform:translate(0,0)}25%{transform:translate(-2px,1px)}50%{transform:translate(2px,-1px)}75%{transform:translate(-1px,1.5px)}}',
+ '.dshwv-img.dshwv-a-tremble{animation:dshwvTremble .16s linear infinite}',
+ '@keyframes dshwvSway{0%,100%{transform:rotate(-2.5deg)}50%{transform:rotate(2.5deg)}}',
+ '.dshwv-root.dshwv-dragging .dshwv-img{animation:dshwvSway .7s ease-in-out infinite}',
   // v751（PR #119）：光标不再写 document.body.style.cursor —— cursor 是可继承属性，写 <body> 会让 Blink
   // 失效**整棵文档树**的样式；而它在点击链路上按下/抬手各写一次，紧接着 isWhaleHit() 的
   // getBoundingClientRect() 与泡泡行测量的 getComputedStyle()/scrollWidth 会强制刷新样式+布局，
@@ -12537,6 +12551,8 @@ function sceneOpen(kind, renderFn, ttlMs) {
   function finish() {
     try { renderFn() } catch (err) {}
     try { bubbleBox.classList.add('dshwv-pop-open') } catch (err) {}
+    // custom-pet：泡泡**首次**弹出时跳一下（内容切换 wasOpen=true 不跳，避免连点刷屏）
+    try { if (!wasOpen) runImgAnim('jump', 700) } catch (err) {}
     // 内容替换(泡泡已开着)时淡入新文字;首次打开不加内联透明度,
     // 文字显隐交给 CSS(.dshwv-pop-open 才显示,带 .36s 延时跟随泡泡成形)
     if (wasOpen) {
@@ -14428,6 +14444,7 @@ function resetBalanceState() {
 function refresh(manual) {
   if (busy) return
   busy = true
+  var prevStatus = state.status // custom-pet：摇头只在 error 跃迁时触发，避免每 60s 轮询重抖
   if (animDelayTimer) { clearTimeout(animDelayTimer); animDelayTimer = null }
   if (manual || state.balance === null) { state.status = 'loading'; render() }
   var ctrl = null
@@ -14491,6 +14508,7 @@ function refresh(manual) {
         //   界面只显示一句人类可读的文案，而 code（NO_KEY / BOTH_FAILED / SHAPE …）才是排查入口。
         try { console.warn('[dsh-whale] 余额读取失败', (data && data.code) || '', state.message) } catch (err) {}
         render()
+        if (prevStatus !== 'error') { try { runImgAnim('shake', 550) } catch (err) {} } // custom-pet：读不到数 → 摇头（仅跃迁时）
         balanceRetryLater()
       }
     })
@@ -14498,6 +14516,7 @@ function refresh(manual) {
       state.status = 'error'
       state.message = '获取失败'
       render()
+      if (prevStatus !== 'error') { try { runImgAnim('shake', 550) } catch (err) {} } // custom-pet：网络错误同样摇头（仅跃迁时）
       balanceRetryLater()
     })
     .finally(function () {
@@ -15105,6 +15124,13 @@ function setMood(state, level) {
     // 若泡泡正显示着，先收起，避免旧文案停在屏幕上；下次点击即用新队列。
     try { refreshBubbleCfgFromHost(function () {}) } catch (err) {}
     try { if (bubbleShown) hideBubble() } catch (err) {}
+    // 动作：进入生气 → 摇头一下 + 开启周期颤动；消气 → 停颤动、回呼吸
+    if (state === 'angry') {
+      try { runImgAnim('shake', 600) } catch (err) {}
+      try { moodTrembleStart() } catch (err) {}
+    } else {
+      try { moodTrembleStop() } catch (err) {}
+    }
   }
   return changed
 }
@@ -15128,6 +15154,45 @@ function moodStartPoll() {
     if (moodPollTimer) return
     moodPollTimer = setInterval(moodSync, 20000)
   } catch (err) {}
+}
+
+// ===== custom-pet：动作系统（场景自动触发，不引入精灵图）=====
+// 场景 → 动作（CSS 定义在 css 数组里，动画挂 img、按压挤压 SQUISH 挂 body，两层不冲突）：
+//   泡泡首次弹出(任意来源) → 跳跃   余额读取失败 → 摇头
+//   进入生气 → 摇头 + 之后每 8s 一次短颤动（不打断正在进行的动作）
+//   拖拽中 → 摇摆（纯 CSS .dshwv-dragging）   平时 → 呼吸（常驻微幅）
+var IMG_ANIM_CLS = ['dshwv-a-breathe', 'dshwv-a-jump', 'dshwv-a-shake', 'dshwv-a-tremble']
+var imgAnimTimer = null
+var moodTrembleTimer = null
+
+function imgAnimSet(cls, on) {
+  try { if (on) img.classList.add(cls); else img.classList.remove(cls) } catch (err) {}
+}
+// 跑一个一次性动作：先清掉所有动作类，ms 后结束并恢复呼吸
+function runImgAnim(name, ms) {
+  try {
+    if (!img || !name) return
+    if (imgAnimTimer) { clearTimeout(imgAnimTimer); imgAnimTimer = null }
+    for (var i = 0; i < IMG_ANIM_CLS.length; i++) imgAnimSet(IMG_ANIM_CLS[i], false)
+    imgAnimSet('dshwv-a-' + name, true)
+    imgAnimTimer = setTimeout(function () {
+      imgAnimTimer = null
+      imgAnimSet('dshwv-a-' + name, false)
+      imgAnimSet('dshwv-a-breathe', true)
+    }, ms)
+  } catch (err) {}
+}
+// 生气期间的周期颤动：每 8s 一次 0.7s；正在做别的动作（跳跃/摇头）时跳过
+function moodTrembleStart() {
+  if (moodTrembleTimer) return
+  moodTrembleTimer = setInterval(function () {
+    if (moodState !== 'angry' || imgAnimTimer) return
+    runImgAnim('tremble', 700)
+  }, 8000)
+}
+function moodTrembleStop() {
+  if (moodTrembleTimer) { clearInterval(moodTrembleTimer); moodTrembleTimer = null }
+  imgAnimSet('dshwv-a-tremble', false)
 }
 function setAudioBtnText(t) { try { audioGroupBtnLabel.textContent = t } catch (err) {} }
 // 名称悬停循环滚动：仅当文本溢出容器时，悬停到该行后名称无限循环滚动露出全名，
@@ -17181,6 +17246,8 @@ setupHitTest(initRoleUrl)
 loadRoles()
 // custom-pet：情绪系统启动 —— 先对一次表（重启后若还在生气，立刻换成生气素材），再开轮询
 try { moodSync(); moodStartPoll() } catch (err) {}
+// custom-pet：动作系统启动 —— 常驻呼吸（其他动作触发时临时接管，结束自动恢复）
+try { imgAnimSet('dshwv-a-breathe', true) } catch (err) {}
 loadAudio()
 // 用量设置(任务结束音/预警/预算)加载,并据此初始化主菜单“任务结束”行
 loadUsageSettings(function () {

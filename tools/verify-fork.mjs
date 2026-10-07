@@ -132,6 +132,25 @@ check('前端双副本逐字节一致', () => {
   )
 })
 
+check('动作系统（场景自动触发的 CSS 动画）', () => {
+  const abs = path.join(ROOT, 'assets', 'whale-widget.js')
+  const src = fs.readFileSync(abs, 'utf8')
+  // CSS 定义：五个 keyframes（呼吸/跳跃/摇头/颤动/摇摆）
+  for (const kf of ['dshwvBreath', 'dshwvJump', 'dshwvShake', 'dshwvTremble', 'dshwvSway']) {
+    assert(src.includes('@keyframes ' + kf), '缺少 @keyframes ' + kf)
+  }
+  assert(src.includes('dshwv-dragging .dshwv-img'), '缺少拖拽摇摆动画（.dshwv-dragging .dshwv-img）')
+  assert(src.includes('transform-origin:50% 100%'), '缺少 transform-origin 钉底（跳跃/摇头会脚离地）')
+  // 触发钩子：场景 → 动作的接线
+  assert(src.includes("runImgAnim('jump'"), '缺少「泡泡弹出 → 跳跃」钩子')
+  assert((src.match(/runImgAnim\('shake'/g) || []).length >= 3,
+    '「摇头」钩子不足 3 处（生气进入 + 两处余额错误）')
+  assert(src.includes('prevStatus'), '余额错误摇头缺跃迁判断（会每 60s 轮询重抖）')
+  assert(src.includes('moodTrembleStart') && src.includes('moodTrembleStop'), '缺少生气期周期颤动的启停')
+  assert(src.includes("imgAnimSet('dshwv-a-breathe', true)"), '缺少常驻呼吸启动')
+  return '呼吸/跳跃/摇头/颤动/摇摆 五动作，钩子与跃迁判断齐全'
+})
+
 // —— ③ 预设 ——
 check('presets/roles.json', () => {
   const p = path.join(ROOT, 'pet-app', 'presets', 'roles.json')
