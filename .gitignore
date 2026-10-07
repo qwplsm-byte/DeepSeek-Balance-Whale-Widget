@@ -31,3 +31,6 @@ _patch_*.patch
 # pet-app（独立桌面宠物）
 pet-app/node_modules/
 pet-app/config.json
+
+# Python 字节码缓存（tools/make-mood-sprites.py 的副产物）
+__pycache__/

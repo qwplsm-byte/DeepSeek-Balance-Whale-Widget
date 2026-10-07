@@ -85,3 +85,24 @@ T7moris 的排版格式（本项目泡泡由代码渲染，不需要 display/fon
 
 **后续可选**（本次不做）：把"动画状态机"（来源三的 9 态）接到情绪系统上做更丰富的动态动作；
 参考 galgame 六字段结构给两个角色写完整 persona/system 文档。
+
+---
+
+## 聊天选项 + 吃醋：规则落点（2026-10-07 定稿）
+
+「她会吃醋」这件事落到文件上是三处，改设定只改这些地方，代码里没有第二份：
+
+| 落点 | 文件 | 说明 |
+|---|---|---|
+| 谁算"别的 AI 娘" | `pet-app/presets/talk.json` 的 `talk.rivals` | 别名表：`deepseek / 小鲸鱼 / 鲸鱼娘 / ds娘 / claude / 克洛德 / 克劳德 / gemini / 双子 / kimi / 月见 / grok / 洛可 / 别的ai / 其他ai / 别的模型 / 其他模型 / 另一只ai`。**大小写无关的子串匹配**，命中即 `jealous`（覆盖选项自带的反应）。注意别名里**不含 `gpt`**（否则她会被自己弄吃醋）。 |
+| 你会看到哪些选项 | `talk.options`（17 条） | 每条 `{ id, t, when, reaction, lines, mentionsOther }`。`when` = 适用情绪（`normal/angry/jealous/sad/any`），所以生气时给的选项与平时不同。 |
+| 她怎么回 | `talk.reactions`（5 种） | `angry`(90s/shake) `jealous`(150s/tremble) `sad`(60s/shake) `serious`(回 normal/jump) `calm`(回 normal/jump)。选项自己的 `lines` 优先，`reactions[x].lines` 是兜底（LLM 关闭或提示词失效时用）。 |
+| 吃醋的表情 | `pet-app/assets/mood/gpt-jealous.png` | 用户后续提供。缺图时宿主按 `jealous → angry → idle → 角色图` 回落，所以机制今天就能用；素材到了跑一条命令即生效（见 `pet-app/README.md`）。 |
+
+**社区依据**：galgame ROSTER（来源二）里五位的名字与气质用于挑选"被夸的对象"——
+鲸鱼娘=直率毒舌（夸她会让她更像"你居然喜欢那种直白的"）、克洛德=文艺、双子=电波、月见=克制傲娇、洛可=敏锐顽皮。
+选项文案里提到谁，就顺着那位的气质反衬 gpt娘 的**优等生 + 过度道歉 + 爱列点**底色，
+例如"清楚？我也可以写得很清楚。第一，我现在不高兴。第二，原因你自己想。"
+
+**不采用**：给每个 rival 单独一套吃醋台词（维护成本 ×6、剧情收益不明显）。
+现在是"吃醋反应共用 + 命中的别名写进 `rival` 字段"，需要时按别名分叉即可。

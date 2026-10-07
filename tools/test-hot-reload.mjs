@@ -48,12 +48,15 @@ async function step(name, fn) {
 
 const rolesFile = path.join(dst, 'presets', 'roles.json')
 const bubblesFile = path.join(dst, 'presets', 'bubbles.json')
+const talkFile = path.join(dst, 'presets', 'talk.json')
 const origRoles = fs.readFileSync(rolesFile, 'utf8')
 const origBubbles = fs.readFileSync(bubblesFile, 'utf8')
+const origTalk = fs.readFileSync(talkFile, 'utf8')
 
 function cleanup() {
   try { fs.writeFileSync(rolesFile, origRoles) } catch (err) {}
   try { fs.writeFileSync(bubblesFile, origBubbles) } catch (err) {}
+  try { fs.writeFileSync(talkFile, origTalk) } catch (err) {}
   try { fs.rmSync(tmp, { recursive: true, force: true }) } catch (err) {}
 }
 
@@ -125,7 +128,27 @@ try {
   await step('reloadPresets() 也清氛围缓存（额度重新探测）', () => {
     const r = pet.reloadPresets()
     assert(typeof r.roles === 'number', '缺 roles 计数')
-    return 'roles=' + r.roles + ' bubbles=' + r.bubbles + ' upstream=' + r.whaleItems
+    assert(r.talkOptions > 0, '缺聊天选项计数（talk.json 没进热重载名单）')
+    return 'roles=' + r.roles + ' bubbles=' + r.bubbles + ' upstream=' + r.whaleItems + ' talk=' + r.talkOptions
+  })
+
+  await step('改 presets/talk.json → 不重启即可读到新选项（mtime 自动失效）', () => {
+    const obj = JSON.parse(origTalk)
+    obj.talk.idleMin = 7
+    obj.talk.options[0].t = '热重载选项测试'
+    writeWithNewMtime(talkFile, JSON.stringify(obj, null, 2))
+    const spec = pet.talkSpec()
+    assert(spec.idleMin === 7, '未读到新 idleMin：' + spec.idleMin)
+    assert(spec.options[0].t === '热重载选项测试', '未读到新选项正文：' + spec.options[0].t)
+    return 'idleMin=7 / 首条选项已更新'
+  })
+
+  await step('talk.json 写坏时不崩：沿用上一次成功的值', () => {
+    writeWithNewMtime(talkFile, '{ 这不是合法 JSON')
+    const spec = pet.talkSpec()
+    assert(spec.idleMin === 7, '没有沿用上次成功的值（idleMin=' + spec.idleMin + '）')
+    assert((spec.options || []).length >= 10, '选项池被降级成空：' + (spec.options || []).length)
+    return '沿用上次成功值：' + spec.idleMin + ' / ' + spec.options.length + ' 条'
   })
 
   try { server.close() } catch (err) {}

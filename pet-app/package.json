@@ -1,7 +1,7 @@
 {
   "name": "dsh-pet-desktop",
-  "version": "0.1.0",
-  "description": "dsh-whale-widget 桌面宠物版：Electron 透明置顶窗口承载余额挂件（custom-pet 形象）",
+  "version": "0.2.0",
+  "description": "dsh-whale-widget 桌面宠物版：Electron 透明置顶窗口承载余额挂件（custom-pet 形象 + 情绪/聊天选项/吃醋）",
   "main": "main.js",
   "private": true,
   "scripts": {

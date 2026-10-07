@@ -234,8 +234,126 @@ check('presets/bubbles.json', () => {
     assert(typeof l.t === 'string' && l.t, 'chatter 台词缺少 t')
     assert(typeof l.w === 'number' && l.w > 0, 'chatter 台词缺少权重 w：' + l.t)
   }
+  // 吃醋 / 伤心台词池（点她时的反应）：扁平数组，可选；缺失由宿主回落到生气池
+  for (const key of ['gptJealous', 'gptSad', 'whaleJealous', 'whaleSad']) {
+    if (data[key] === undefined) continue
+    assert(Array.isArray(data[key]) && data[key].length, key + ' 必须是非空数组（扁平台词，不带档位）')
+    for (const l of data[key]) {
+      assert(typeof l.t === 'string' && l.t, key + ' 台词缺少 t')
+      assert(typeof l.w === 'number' && l.w > 0, key + ' 台词缺少权重 w：' + l.t)
+    }
+  }
   return gpt.items.length + ' 泡 / 台词 ' + lines.length + ' 句 / 生气台词 ' + angryTotal +
     ' 句 / 主动说话 ' + ch.lines.length + ' 句（' + lo + '-' + hi + ' 分钟）'
+})
+
+// ============================================================================
+// 聊天选项 + 吃醋（pet-app/presets/talk.json）
+//
+// 这一条拦的是"看起来能用、其实永远走不到某个分支"的静默缺陷：
+//   ① 选项池太小 / 某个情绪态筛完不足 3 条 → 那个状态下永远弹不出选项（不报错）
+//   ② mentionsOther 与正文里的 rivals 别名不一致 → "标了不吃醋"或"没标却吃醋"
+//   ③ 选项引用了没定义的 reaction → 反应落到兜底分支，台词对不上
+//   ④ 前端/宿主/插件端三处接线缺一 → 运行时静默 404 或点了没反应
+// ============================================================================
+check('聊天选项 / 吃醋机制（presets/talk.json + 三处接线）', () => {
+  const p = path.join(ROOT, 'pet-app', 'presets', 'talk.json')
+  assert(fs.existsSync(p), 'pet-app/presets/talk.json 不存在（聊天选项的单一来源）')
+  const t = JSON.parse(fs.readFileSync(p, 'utf8')).talk
+  assert(t && typeof t === 'object', 'talk.json 缺少 talk 段')
+  assert(typeof t.enabled === 'boolean', 'talk.enabled 必须是布尔值')
+  assert(Number(t.idleMin) >= 1, 'talk.idleMin 必须是 >=1 的分钟数')
+  assert(Number(t.optionCount) === 3, 'talk.optionCount 必须是 3（需求：每次给三个选项）')
+  assert(Number(t.noRepeat) >= 3, 'talk.noRepeat 至少为 3（否则同一轮里会重复）')
+  assert(Number(t.angryRepeatMin) >= 1, 'talk.angryRepeatMin 必须是 >=1 的分钟数')
+  assert(Number(t.answerTimeoutMs) >= 10000, 'talk.answerTimeoutMs 至少 10 秒（否则用户来不及点）')
+  // 版式上限是**实测**出来的：泡泡文本框 677u×448u、选项行字号 4（52u），
+  // 前缀「① 」约占 2 字宽 ⇒ 正文 ≤12 字才排得下单行。超过就会折行、贴到泡泡边。
+  assert(Number(t.maxOptionChars) <= 12, 'talk.maxOptionChars 必须 ≤12（实测 >12 字会在泡泡里折行，贴到白边）')
+
+  const opts = t.options
+  assert(Array.isArray(opts) && opts.length >= 10, '选项池至少要有 10 条（需求下限），实际 ' +
+    (Array.isArray(opts) ? opts.length : '不是数组'))
+  const rivals = t.rivals
+  assert(Array.isArray(rivals) && rivals.length >= 4, 'rivals 至少要有 4 个别名（别的 AI 娘的名字）')
+  const hitRival = (s) => rivals.some((r) => String(r || '').trim() && String(s || '').toLowerCase().indexOf(String(r).trim().toLowerCase()) >= 0)
+  const ids = new Set()
+  let rivalMarked = 0
+  for (const o of opts) {
+    assert(o && typeof o.id === 'string' && o.id, '选项缺少 id')
+    assert(!ids.has(o.id), '选项 id 重复：' + o.id)
+    ids.add(o.id)
+    assert(typeof o.t === 'string' && o.t, o.id + ' 缺少正文 t')
+    // 版式硬约束：泡泡文本框只有 677u×448u，3 个选项 + 1 句开场要一起塞下。
+    // 预设与 LLM 走同一条上限（maxOptionChars），否则接了 LLM 就会溢出泡泡。
+    assert(o.t.length <= Number(t.maxOptionChars), o.id + ' 正文过长（' + o.t.length + ' > ' +
+      t.maxOptionChars + ' 字）：' + o.t)
+    assert(t.reactions && t.reactions[o.reaction], o.id + ' 的 reaction 未在 reactions 里定义：' + o.reaction)
+    assert(['any', 'normal', 'angry', 'jealous', 'sad'].indexOf(o.when || 'any') >= 0,
+      o.id + ' 的 when 不合法：' + o.when)
+    assert(Array.isArray(o.lines) && o.lines.length, o.id + ' 缺少她自己的 reaction 台词 lines')
+    const inText = hitRival(o.t)
+    if (o.mentionsOther === true) {
+      assert(inText, o.id + ' 标了 mentionsOther，但正文里没有任何 rivals 别名（会"标了却不吃醋"）')
+      assert(o.reaction === 'jealous', o.id + ' 提到别的 AI 娘，reaction 必须是 jealous')
+      rivalMarked++
+    } else {
+      assert(!inText, o.id + ' 正文里出现了 rivals 别名却没标 mentionsOther（会被宿主强制判成吃醋，与标注不符）')
+    }
+    if (o.reaction === 'jealous') {
+      assert(o.mentionsOther === true, o.id + ' 的 reaction=jealous，必须同时标 mentionsOther 说明提到谁')
+    }
+  }
+  assert(rivalMarked >= 3, '至少要有 3 条"提到别的 AI 娘"的选项（保证纯预设也能吃到醋），实际 ' + rivalMarked)
+  for (const st of ['normal', 'angry', 'jealous', 'sad']) {
+    const n = opts.filter((o) => !o.when || o.when === 'any' || o.when === st).length
+    assert(n >= Number(t.optionCount), st + ' 状态下可抽的选项只有 ' + n + ' 条，不足 ' + t.optionCount + ' 条（那个状态永远弹不出）')
+  }
+  // 五个反应都必须有兜底台词与合法动作（LLM 关闭 / LLM 失败时全靠它们）
+  for (const r of ['angry', 'jealous', 'sad', 'serious', 'calm']) {
+    const rr = t.reactions[r]
+    assert(rr && Array.isArray(rr.lines) && rr.lines.length, 'reactions.' + r + ' 缺少兜底台词')
+    assert(['shake', 'tremble', 'jump'].indexOf(String(rr.action)) >= 0, 'reactions.' + r + '.action 不合法：' + rr.action)
+  }
+  assert(t.opening && t.opening.normal && t.opening.angry && Array.isArray(t.opening.pending),
+    'opening 需要 normal / angry / pending（pending = 等 LLM 回包时垫的那句）')
+  // 开场白只显示一句（前端 slice(0,1)），同样受文本框宽度约束
+  for (const st of Object.keys(t.opening)) {
+    for (const l of (Array.isArray(t.opening[st]) ? t.opening[st] : [])) {
+      assert(String(l.t).length <= 20, 'opening.' + st + ' 的那句太长（' + String(l.t).length +
+        ' 字，含占位符）—— 泡泡里会折成两行挤掉选项：' + l.t)
+    }
+  }
+  assert(t.llmPrompt && t.llmPrompt.system && t.llmPrompt.open && t.llmPrompt.react,
+    'llmPrompt 需要 system / open / react（人设文案不写在代码里）')
+
+  // —— 三处接线 ——
+  const front = fs.readFileSync(FRONT_FILE, 'utf8')
+  for (const need of ["'/dsh-whale/talk.json'", 'function talkSchedule', 'function talkTry', 'function talkChoose',
+    'function talkShowOptions', "sceneOpen('talk'", "type: 'choices'", 'dshwv-choice', 'applyMoodSnapshot']) {
+    assert(front.includes(need), '前端缺少聊天选项接线：' + need)
+  }
+  assert(front.includes('talkCfg = d.talk'), 'refreshBubbleCfgFromHost/loadBubbleCfg 未接收顶层 talk 配置')
+  assert(front.includes('talkBaselineAt = Date.now()'), '点她未重置聊天选项的 idle 基准')
+  assert(front.includes('talkChooseIgnored'), '点泡泡本体未按"被无视"处理')
+  const server = fs.readFileSync(path.join(ROOT, 'pet-app', 'server.js'), 'utf8')
+  for (const need of ["p === '/dsh-whale/talk.json'", 'function talkSpec', 'function talkOpenPayload',
+    'function talkResolve', 'function talkRivalHit', 'function llmChat', 'function normalizeLlm',
+    "source = 'preset'", 'base.talk =', 'talk.json']) {
+    assert(server.includes(need), 'pet-app/server.js 缺少聊天选项接线：' + need)
+  }
+  assert(server.includes('MOOD_STATES') && server.includes("jealous: 'angry'"),
+    '服务端缺少多情绪状态或素材回落链（吃醋/伤心没有素材时要回落到生气素材）')
+  assert(server.includes("p === '/pet-test-llm'"), '服务端缺少 /pet-test-llm（设置页的「测试连接」）')
+  const host = fs.readFileSync(path.join(ROOT, 'lib', 'index.js'), 'utf8')
+  assert(host.includes("path: '/dsh-whale/talk.json'"), 'lib/index.js 未登记 /dsh-whale/talk.json（前端会静默 404 + ci-audit 对等检查判红）')
+  assert(host.includes('enabled: false'), 'lib/index.js 的 talk.json 占位应答应明确 enabled:false')
+  const cfgPage = fs.readFileSync(path.join(ROOT, 'pet-app', 'public', 'config.html'), 'utf8')
+  for (const id of ['talkon', 'talkidle', 'llmon', 'llmbase', 'llmmodel', 'llmkey']) {
+    assert(cfgPage.includes('id="' + id + '"'), '设置页缺少控件 ' + id)
+  }
+  return opts.length + ' 条选项（' + rivalMarked + ' 条提到别的 AI 娘）/ rivals ' + rivals.length +
+    ' 个 / idle ' + t.idleMin + ' 分钟 / 三处接线齐全'
 })
 
 check('上游默认台词队列已同步（bubble-default-whale.json）', () => {
@@ -301,28 +419,37 @@ check('角色图 PNG 结构（3 个文件）', () => {
 check('情绪素材（pet-app/assets/mood）', () => {
   const dir = path.join(ROOT, 'pet-app', 'assets', 'mood')
   assert(fs.existsSync(dir), 'pet-app/assets/mood 不存在（情绪系统需要成套素材）')
-  // 每个有情绪的角色一套：<前缀>-idle.png / <前缀>-angry.png
-  // 前缀来自 presets/roles.json 的角色 id（default → gpt，whale → whale）
+  // 每个有情绪的角色一套：<前缀>-idle.png / <前缀>-angry.png 是**必需**的；
+  // 吃醋（jealous）/伤心（sad）等是**可选**扩展态：文件在就必须合法且与 idle 同画布，
+  // 不在就由宿主回落到生气素材（见 server.js 的 MOOD_STATE_FALLBACK），不算错误。
   const EXPECT = { gpt: 'default', whale: 'whale' }
+  const EXTRA = ['jealous', 'sad']
   const details = []
+  const checkOne = (f, abs) => {
+    assert(fs.existsSync(abs), '缺少 ' + f + '（生成见 pet-app/README.md 的素材管线说明）')
+    const i = parsePng(abs)
+    assert(i.sawIend && i.chunks.includes('IDAT'), f + ' 结构异常')
+    const bad = i.chunks.filter((c) => !PNG_CHUNK_WHITELIST.includes(c))
+    assert(!bad.length, f + ' 含非白名块：' + [...new Set(bad)].join(', '))
+    const hasAlpha = i.ihdr.colorType === 6 || (i.ihdr.colorType === 3 && i.chunks.includes('tRNS'))
+    assert(hasAlpha, f + ' 没有透明通道')
+    return i.ihdr.width + 'x' + i.ihdr.height
+  }
   for (const prefix of Object.keys(EXPECT)) {
     const pair = {}
-    for (const state of ['idle', 'angry']) {
-      const f = prefix + '-' + state + '.png'
-      const abs = path.join(dir, f)
-      assert(fs.existsSync(abs), '缺少 ' + f + '（生成见 pet-app/README.md 的素材管线说明）')
-      const i = parsePng(abs)
-      assert(i.sawIend && i.chunks.includes('IDAT'), f + ' 结构异常')
-      const bad = i.chunks.filter((c) => !PNG_CHUNK_WHITELIST.includes(c))
-      assert(!bad.length, f + ' 含非白名块：' + [...new Set(bad)].join(', '))
-      const hasAlpha = i.ihdr.colorType === 6 || (i.ihdr.colorType === 3 && i.chunks.includes('tRNS'))
-      assert(hasAlpha, f + ' 没有透明通道')
-      pair[state] = i.ihdr.width + 'x' + i.ihdr.height
-    }
+    for (const state of ['idle', 'angry']) pair[state] = checkOne(prefix + '-' + state + '.png', path.join(dir, prefix + '-' + state + '.png'))
     // 同角色两态必须同尺寸：否则切换时角色会跳位（生成脚本已断言，这里上锁）
     assert(pair.idle === pair.angry,
       prefix + ' 的 idle 与 angry 尺寸不一致（' + pair.idle + ' vs ' + pair.angry + '）—— 情绪切换会跳位')
-    details.push(prefix + ' ' + pair.idle)
+    const extras = []
+    for (const state of EXTRA) {
+      const abs = path.join(dir, prefix + '-' + state + '.png')
+      if (!fs.existsSync(abs)) continue
+      const size = checkOne(prefix + '-' + state + '.png', abs)
+      assert(size === pair.idle, prefix + '-' + state + ' 与 idle 画布不一致（' + size + ' vs ' + pair.idle + '）—— 切换会跳位')
+      extras.push(state)
+    }
+    details.push(prefix + ' ' + pair.idle + (extras.length ? '（含 ' + extras.join('/') + '）' : '（未提供吃醋/伤心素材，回落生气）'))
   }
   return details.join(' / ')
 })
@@ -446,45 +573,57 @@ check('情绪素材几何一致（同画布 / 头宽一致 / 锚定右下角）'
   const dir = path.join(ROOT, 'pet-app', 'assets', 'mood')
   const details = []
   const issues = []
+  // 多态（吃醋/伤心）如果提供了素材，也要和 idle 保持同一套几何 —— 否则切过去一样会跳位。
+  // 文件不存在不算问题（宿主会回落到生气素材）。
+  const EXTRA = ['jealous', 'sad']
+  const load = (prefix, state) => {
+    const abs = path.join(dir, prefix + '-' + state + '.png')
+    return fs.existsSync(abs) ? decodePngLumAlpha(abs) : null
+  }
   for (const prefix of ['gpt', 'whale']) {
-    const imgs = {}
-    for (const state of ['idle', 'angry']) {
-      const abs = path.join(dir, prefix + '-' + state + '.png')
-      if (!fs.existsSync(abs)) { issues.push(prefix + '-' + state + '.png 缺失'); break }
-      imgs[state] = decodePngLumAlpha(abs)
-    }
-    if (!imgs.idle || !imgs.angry) continue
+    const imgs = { idle: load(prefix, 'idle') }
+    if (!imgs.idle) { issues.push(prefix + '-idle.png 缺失'); continue }
+    const states = ['angry']
+    for (const s of EXTRA) { if (fs.existsSync(path.join(dir, prefix + '-' + s + '.png'))) states.push(s) }
+    for (const st of states) imgs[st] = load(prefix, st)
+    if (!imgs.angry) { issues.push(prefix + '-angry.png 缺失'); continue }
 
-    // ① 同画布（否则挂件缩放比不同）
-    if (imgs.idle.width !== imgs.angry.width || imgs.idle.height !== imgs.angry.height) {
-      issues.push(prefix + ' 两态画布不一致：' +
-        imgs.idle.width + 'x' + imgs.idle.height + ' vs ' + imgs.angry.width + 'x' + imgs.angry.height)
-      continue
-    }
-    const bi = contentBoxOf(imgs.idle)
-    const ba = contentBoxOf(imgs.angry)
-    if (!bi || !ba) { issues.push(prefix + ' 有一态整张透明'); continue }
+    for (const st of states) {
+      const cur = imgs[st]
+      if (!cur) continue
+      // ① 同画布（否则挂件缩放比不同）
+      if (imgs.idle.width !== cur.width || imgs.idle.height !== cur.height) {
+        issues.push(prefix + ' 的 idle 与 ' + st + ' 画布不一致：' +
+          imgs.idle.width + 'x' + imgs.idle.height + ' vs ' + cur.width + 'x' + cur.height)
+        continue
+      }
+      const bi = contentBoxOf(imgs.idle)
+      const ba = contentBoxOf(cur)
+      if (!bi || !ba) { issues.push(prefix + '-' + st + ' 整张透明'); continue }
 
-    // ② 头宽一致（决定"切到生气时头像会不会突然变大"）
-    const hi = headWidthOf(imgs.idle, bi)
-    const ha = headWidthOf(imgs.angry, ba)
-    if (Math.abs(hi - ha) > 3) {
-      issues.push(prefix + ' 两态头部宽度差 ' + Math.abs(hi - ha) + 'px（' + hi + ' vs ' + ha +
-        '）—— 挂件里切状态时头像会缩放，看起来像"第二态没裁剪好"')
-    }
+      // ② 头宽一致（决定"切过去时头像会不会突然变大"）
+      const hi = headWidthOf(imgs.idle, bi)
+      const ha = headWidthOf(cur, ba)
+      if (Math.abs(hi - ha) > 3) {
+        issues.push(prefix + ' idle 与 ' + st + ' 头部宽度差 ' + Math.abs(hi - ha) + 'px（' + hi + ' vs ' + ha +
+          '）—— 挂件里切状态时头像会缩放，看起来像"没裁剪好"')
+      }
 
-    // ③ 主体锚定右下角（挂件 right bottom 对齐 ⇒ 落点才一致）
-    const W = imgs.idle.width, H = imgs.idle.height
-    for (const [name, b] of [['idle', bi], ['angry', ba]]) {
-      const mr = W - 1 - b.maxX
-      const mb = H - 1 - b.maxY
-      if (mr > 1 || mb > 1) {
-        issues.push(prefix + '-' + name + ' 未锚定右下角（右边距 ' + mr + ' 下边距 ' + mb +
-          '）—— 两态落点会不同')
+      // ③ 主体锚定右下角（挂件 right bottom 对齐 ⇒ 落点才一致）
+      const W = imgs.idle.width, H = imgs.idle.height
+      for (const [name, b] of [['idle', bi], [st, ba]]) {
+        const mr = W - 1 - b.maxX
+        const mb = H - 1 - b.maxY
+        if (mr > 1 || mb > 1) {
+          issues.push(prefix + '-' + name + ' 未锚定右下角（右边距 ' + mr + ' 下边距 ' + mb +
+            '）—— 各状态落点会不同')
+        }
+      }
+      if (st === 'angry') {
+        details.push(prefix + ' 画布' + W + 'x' + H + ' 头宽' + hi + '/' + ha +
+          ' 右下角(' + (W - 1 - bi.maxX) + ',' + (H - 1 - bi.maxY) + ')')
       }
     }
-    details.push(prefix + ' 画布' + W + 'x' + H + ' 头宽' + hi + '/' + ha +
-      ' 右下角(' + (W - 1 - bi.maxX) + ',' + (H - 1 - bi.maxY) + ')')
   }
   assert(!issues.length, issues.join('；') + '。重新生成：见 pet-app/README.md 的「情绪素材」一节')
   return details.join(' / ')

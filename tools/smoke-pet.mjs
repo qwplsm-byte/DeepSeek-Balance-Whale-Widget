@@ -12,6 +12,7 @@
 // ============================================================================
 
 import fs from 'node:fs'
+import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
@@ -25,6 +26,7 @@ const FILES = [
   'presets/roles.json',
   'presets/bubbles.json',
   'presets/bubble-default-whale.json',
+  'presets/talk.json',
   'public/index.html',
   'public/config.html',
 ]
@@ -53,6 +55,7 @@ const pet = require(path.join(tmp, 'server.js'))
 
 const results = []
 let server = null
+let fakeLlmServer = null
 let failed = 0
 
 function assert(cond, msg) { if (!cond) throw new Error(msg) }
@@ -68,6 +71,7 @@ async function step(name, fn) {
 
 function cleanup() {
   try { if (server) server.close() } catch (err) {}
+  try { if (fakeLlmServer) fakeLlmServer.close() } catch (err) {}
   try { fs.rmSync(tmp, { recursive: true, force: true }) } catch (err) {}
 }
 
@@ -395,6 +399,222 @@ try {
     } finally {
       pet.writeConfig({ dsKey: savedKey || '' })
     }
+  })
+
+  // ==========================================================================
+  // 聊天选项 + 吃醋（presets/talk.json + /dsh-whale/talk.json）
+  // 覆盖：规格下发、每轮选项都不同、token 一次性、rival → 吃醋、被无视 → 伤心、
+  //       消气回 normal、点她时的情绪台词池、LLM 路径与静默回落、密钥卫生。
+  // ==========================================================================
+  const talkOpen = async () => post('/dsh-whale/talk.json', { action: 'open' })
+  const talkChoose = async (token, id, cause) => post('/dsh-whale/talk.json',
+    cause ? { action: 'choose', token: token, id: '', cause: cause } : { action: 'choose', token: token, id: id })
+
+  await step('聊天选项：规格下发（enabled / idleMin=5 / 每次 3 个）', async () => {
+    pet.resetMoodState()
+    const r = await getJson('/dsh-whale/talk.json')
+    assert(r.status === 200 && r.body && r.body.ok === true, 'GET talk.json 结构异常')
+    assert(r.body.enabled === true, '期望 enabled=true')
+    assert(r.body.idleMin === 5, '期望 idleMin=5，实际 ' + r.body.idleMin)
+    assert(r.body.optionCount === 3, '期望 optionCount=3')
+    assert(r.body.mode === 'preset', '未配 LLM 时 mode 应为 preset')
+    assert(r.body.options >= 10, '选项池至少 10 条，实际 ' + r.body.options)
+    const b = await getJson('/dsh-whale/bubble.json')
+    assert(b.body.talk && b.body.talk.enabled === true, 'bubble.json 顶层未下发 talk')
+    assert(b.body.config.talk === undefined, 'talk 不该混进 config（会被气泡编辑器存档固化）')
+    return 'idleMin=' + r.body.idleMin + ' / 池 ' + r.body.options + ' 条 / mode=' + r.body.mode
+  })
+
+  await step('聊天选项：每轮 3 个且互不相同、四轮之间不重复', async () => {
+    const keys = []
+    for (let i = 0; i < 4; i++) {
+      pet.setMoodState('normal', 0)
+      const r = await talkOpen()
+      assert(r.body.ok && r.body.options.length === 3, '第 ' + (i + 1) + ' 轮没给 3 个选项')
+      const ids = r.body.options.map((o) => o.id)
+      assert(new Set(ids).size === 3, '第 ' + (i + 1) + ' 轮选项有重复：' + ids.join(','))
+      keys.push(ids.slice().sort().join(','))
+      await talkChoose(r.body.token, '', 'ignored')   // 答掉这一轮，避免 30 秒复用窗口
+    }
+    assert(new Set(keys).size === 4, '四轮选项集合出现重复：' + keys.join(' | '))
+    return keys.join(' | ')
+  })
+
+  await step('聊天选项：30 秒内重复 open 复用同一轮（前端重复请求不换选项）', async () => {
+    pet.setMoodState('normal', 0)
+    const a = await talkOpen()
+    const b = await talkOpen()
+    assert(a.body.token === b.body.token && b.body.reused === true, '重复 open 没有复用同一 token')
+    await talkChoose(a.body.token, '', 'ignored')
+    return 'token 复用 ✓'
+  })
+
+  await step('吃醋：提到别的 AI 娘的选项 → reaction=jealous + 情绪落盘 + 吃醋台词', async () => {
+    pet.resetMoodState()
+    let hit = null
+    for (let i = 0; i < 12 && !hit; i++) {
+      pet.setMoodState('normal', 0)
+      const r = await talkOpen()
+      const o = r.body.options.find((x) => /deepseek|claude|gemini|kimi|月见|克洛德/i.test(x.t))
+      if (o) hit = { token: r.body.token, o: o }
+      else await talkChoose(r.body.token, '', 'ignored')
+    }
+    assert(hit, '12 轮内没抽到任何"提到别的 AI 娘"的选项')
+    const r = await talkChoose(hit.token, hit.o.id)
+    assert(r.body.reaction === 'jealous', '期望 jealous，实际 ' + r.body.reaction)
+    assert(r.body.jealous === true && r.body.rival, '缺少 jealous 标记或命中的别名')
+    assert(r.body.mood && r.body.mood.state === 'jealous', 'mood 未切到 jealous')
+    assert(pet.currentMood().state === 'jealous', 'config.json 里没落成 jealous（重启就变回去）')
+    assert(Array.isArray(r.body.lines) && r.body.lines.length, '吃醋没有台词')
+    assert(r.body.action === 'tremble', '吃醋动作应为 tremble，实际 ' + r.body.action)
+    // 吃醋素材缺失时取图必须回落到生气素材，且仍是合法 PNG（不能 404）
+    const img = await fetch(base + '/dsh-whale/mood-image.png')
+    const buf = Buffer.from(await img.arrayBuffer())
+    assert(img.status === 200, '吃醋态取图 HTTP ' + img.status)
+    assert(buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])), '不是 PNG 签名')
+    const again = await talkChoose(hit.token, hit.o.id)
+    assert(again.status === 409, '同一 token 再选一次应 409，实际 ' + again.status)
+    return hit.o.t + ' → jealous（rival=' + r.body.rival + '）'
+  })
+
+  await step('聊天选项：被无视（点掉泡泡 / 90 秒不理）→ 伤心并落盘', async () => {
+    pet.setMoodState('angry', 60000)
+    const r = await talkOpen()
+    const d = await talkChoose(r.body.token, '', 'ignored')
+    assert(d.body.reaction === 'sad', '期望 sad，实际 ' + d.body.reaction)
+    assert(pet.currentMood().state === 'sad', 'config.json 里没落成 sad')
+    return 'ignored → sad ✓'
+  })
+
+  await step('聊天选项：消气选项 → 回到 normal', async () => {
+    let calmed = false
+    for (let i = 0; i < 12 && !calmed; i++) {
+      pet.setMoodState('angry', 60000)
+      const r = await talkOpen()
+      const target = r.body.options.find((o) => /^o0[1-4]$/.test(o.id)) || r.body.options[0]
+      const d = await talkChoose(r.body.token, target.id)
+      if (d.body.reaction === 'calm') calmed = true
+      else await talkChoose(r.body.token, '', 'ignored')
+    }
+    assert(calmed, '12 轮内没抽到 calm 选项')
+    assert(pet.currentMood().state === 'normal', 'calm 后应回到 normal')
+    return 'calm → normal ✓'
+  })
+
+  await step('聊天选项：错 token / 不存在的选项被拒（不会重复降情绪）', async () => {
+    pet.resetMoodState()
+    const bad = await talkChoose('not-a-token', 'o01')
+    assert(bad.status === 409, '错 token 应 409，实际 ' + bad.status)
+    const r = await talkOpen()
+    const no = await post('/dsh-whale/talk.json', { action: 'choose', token: r.body.token, id: 'o-not-exist' })
+    assert(no.status === 400, '不存在的选项应 400，实际 ' + no.status)
+    await talkChoose(r.body.token, '', 'ignored')
+    return '409 / 400 ✓'
+  })
+
+  await step('情绪台词池：吃醋/伤心时点她回对应台词（两角色各用各的池）', async () => {
+    await post('/dsh-whale/role-current.json', { id: 'default' })
+    pet.setMoodState('jealous', 60000)
+    const j = (await getJson('/dsh-whale/bubble.json')).body
+    assert(j.source === 'jealous', '期望 source=jealous，实际 ' + j.source)
+    const jl = j.config.items[0].modules[0].lines.map((l) => l.t).join('|')
+    assert(/横向对比|列三点/.test(jl), 'gpt娘 吃醋台词池未生效：' + jl.slice(0, 60))
+    pet.setMoodState('sad', 60000)
+    const s = (await getJson('/dsh-whale/bubble.json')).body
+    assert(s.source === 'sad', '期望 source=sad，实际 ' + s.source)
+    const sl = s.config.items[0].modules[0].lines.map((l) => l.t).join('|')
+    assert(/对话框转过去|自己待着/.test(sl), 'gpt娘 伤心台词池未生效：' + sl.slice(0, 60))
+    // 小鲸鱼走它自己的一组（whaleJealous / whaleSad），证明不是共用一份
+    await post('/dsh-whale/role-current.json', { id: 'whale' })
+    pet.setMoodState('jealous', 60000)
+    const wj = (await getJson('/dsh-whale/bubble.json')).body
+    const wjl = wj.config.items[0].modules[0].lines.map((l) => l.t).join('|')
+    assert(/夸别人|记了这句话/.test(wjl), '小鲸鱼吃醋台词池未生效：' + wjl.slice(0, 60))
+    await post('/dsh-whale/role-current.json', { id: 'default' })
+    pet.setMoodState('normal', 0)
+    const n = (await getJson('/dsh-whale/bubble.json')).body
+    assert(n.source === 'preset', '消气后应回正常队列，实际 ' + n.source)
+    return 'gpt/whale 的吃醋与伤心台词各就各位'
+  })
+
+  // —— 自定义 LLM（可选后端）：起一个假的 OpenAI 兼容端点，验证"接了就用、坏了就回落"——
+  let llmMode = 'good'
+  await step('自定义 LLM：接上假端点后走 LLM（选项与她的话都来自模型）', async () => {
+    const srv = http.createServer((q, r) => {
+      let body = ''
+      q.on('data', (c) => { body += c })
+      q.on('end', () => {
+        let req = {}
+        try { req = JSON.parse(body) } catch (err) {}
+        const userText = String(((req.messages || [])[1] || {}).content || '')
+        let content
+        if (llmMode !== 'good') content = '这不是 JSON，我随便说点别的'
+        else if (userText.indexOf('options') >= 0) {
+          // 注意每条都在 maxOptionChars（10）以内：超长会被宿主判为不合法而整体回落预设
+          content = JSON.stringify({ opening: '冒烟假端点', options: ['假选项甲', '假选项乙', '夸夸DeepSeek'] })
+        } else {
+          content = '```json\n{"reaction":"jealous","lines":["假端点：我吃醋了"]}\n```'
+        }
+        r.writeHead(200, { 'Content-Type': 'application/json' })
+        r.end(JSON.stringify({ choices: [{ message: { content: content } }] }))
+      })
+    })
+    const port = await new Promise((res) => srv.listen(0, '127.0.0.1', () => res(srv.address().port)))
+    fakeLlmServer = srv
+    const llmBase = 'http://127.0.0.1:' + port + '/v1'
+    await post('/config', { llm: { enabled: true, baseUrl: llmBase, model: 'smoke-fake', apiKey: 'sk-smoke' } })
+    try {
+      const st = await getJson('/dsh-whale/talk.json')
+      assert(st.body.mode === 'llm', '配好后 mode 应为 llm，实际 ' + st.body.mode)
+      const b = await getJson('/dsh-whale/bubble.json')
+      assert(b.body.talk.mode === 'llm', 'bubble.json 的 talk.mode 未跟着变')
+      pet.setMoodState('normal', 0)
+      const r = await talkOpen()
+      assert(r.body.source === 'llm', '期望 source=llm，实际 ' + r.body.source)
+      assert(r.body.options[0].t === '假选项甲', '选项未来自模型：' + JSON.stringify(r.body.options))
+      const d = await talkChoose(r.body.token, r.body.options[0].id)
+      assert(d.body.reaction === 'jealous', 'LLM 生成的选项应由模型定反应，实际 ' + d.body.reaction)
+      assert(String((d.body.lines[0] || {}).t).indexOf('假端点') === 0, '台词未来自模型')
+      return 'mode=llm / 选项与反应均来自模型'
+    } finally {
+      pet.writeConfig({ llm: {} })   // 后面两步自己会重设
+      await post('/config', { llm: { enabled: true, baseUrl: llmBase, model: 'smoke-fake', apiKey: 'sk-smoke' } })
+    }
+  })
+
+  await step('自定义 LLM：返回不是 JSON → 静默回落预设（功能不受影响）', async () => {
+    llmMode = 'bad'
+    try {
+      pet.setMoodState('normal', 0)
+      const r = await talkOpen()
+      assert(r.body.source === 'preset', '模型返回垃圾时应回落 preset，实际 ' + r.body.source)
+      assert(r.body.options.length === 3, '回落后仍要给 3 个选项')
+      return 'source=preset（回落 ✓）'
+    } finally { llmMode = 'good' }
+  })
+
+  await step('设置页「测试连接」：LLM 未配齐给可读错误；配好给样例', async () => {
+    const okr = await post('/pet-test-llm', { baseUrl: '', model: '', apiKey: '' })
+    assert(okr.body.ok === true, '已有保存的配置时应能测通')
+    assert(Array.isArray(okr.body.options) && okr.body.options.length === 3, '测试连接未回 3 个样例选项')
+    await post('/config', { llm: { enabled: false, baseUrl: '', model: '', apiKey: null } })
+    const bad = await post('/pet-test-llm', { baseUrl: '', model: '', apiKey: '' })
+    assert(bad.body.ok === false && bad.body.code === 'NO_LLM', '未配齐时应 NO_LLM，实际 ' + JSON.stringify(bad.body))
+    return 'ok 样例 3 条 / 未配齐 NO_LLM'
+  })
+
+  await step('密钥卫生：llm.apiKey 不进默认备份、不回显、includeKey=1 才进 secret', async () => {
+    await post('/config', { llm: { enabled: true, baseUrl: 'http://127.0.0.1:1/v1', model: 'smoke-fake', apiKey: 'sk-secret-smoke' } })
+    const cfg = (await getJson('/pet-config.json')).body
+    assert(cfg.llm.apiKey === undefined, '设置页接口不该回显明文 Key')
+    assert(cfg.llm.hasKey === true, '应告知"已存 Key"')
+    const b1 = (await getJson('/pet-backup.json')).body
+    assert(b1.config.llm && b1.config.llm.apiKey === undefined, '默认备份不该含 llm.apiKey')
+    const b2 = (await getJson('/pet-backup.json?includeKey=1')).body
+    assert(b2.secret && b2.secret.llm && b2.secret.llm.apiKey === 'sk-secret-smoke', 'includeKey=1 时 Key 应在 secret.llm')
+    await post('/config', { llm: { enabled: false, baseUrl: '', model: '', apiKey: null } })
+    pet.resetMoodState()
+    return 'hasKey=true / 默认剔除 / secret.llm ✓'
   })
 } catch (err) {
   failed++

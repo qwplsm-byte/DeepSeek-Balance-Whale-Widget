@@ -430,6 +430,15 @@ var css = [
   // 大号字体垂直居中修正：flex 容器以 --dshw-vx/--dshw-vy 为整体中心，
   // 内容(任意行数/字号)由 justify-content:center 整体居中，不随字体度量漂移。
   '.dshwv-text .dshwv-trow{flex:0 0 auto;margin:calc(var(--dshw-u) * 2) 0}',
+  // custom-pet：聊天选项行（.dshwv-trow.dshwv-choice）。三个要点：
+  //   · 父层 .dshwv-text 是 pointer-events:none（点泡泡靠底下 SVG 的 painted 区域接事件），
+  //     选项行必须**自己**开 pointer-events:auto 才点得到 —— CSS 允许子元素重新开启。
+  //   · 选择器带满三层（.dshwv-text .dshwv-trow.dshwv-choice）压过上面那条通用行距：
+  //     泡泡文本框只有 677u × 448u，3 个选项 + 1 句开场必须塞得下，所以行距/间距都要更小。
+  //   · 允许折行并限宽 640u（文本框 677u 减去内边距），长选项不会横向溢出泡泡。
+  '.dshwv-text .dshwv-trow.dshwv-choice{pointer-events:auto;cursor:pointer;white-space:normal;overflow-wrap:anywhere;word-break:break-word;max-width:calc(var(--dshw-u) * 660);line-height:1.05;margin:calc(var(--dshw-u) * 1) auto;padding:calc(var(--dshw-u) * 1) calc(var(--dshw-u) * 6);border-radius:calc(var(--dshw-u) * 8);transition:background .12s ease}',
+  '.dshwv-text .dshwv-trow.dshwv-choice:hover{background:rgba(32,49,112,.10)}',
+  '.dshwv-text .dshwv-trow.dshwv-choice:active{background:rgba(32,49,112,.18)}',
   '.dshwv-text .dshwv-mimg{flex:0 0 auto}',
   // label/amount/hint 三行也作为整体在 flex 容器内居中
   '.dshwv-text .dshwv-label,.dshwv-text .dshwv-amount,.dshwv-text .dshwv-hint{flex:0 0 auto;margin-left:auto;margin-right:auto}',
@@ -8296,6 +8305,15 @@ function refreshBubbleCfgFromHost(cb) {
             chatterCfg = d.chatter
             if (JSON.stringify(chatterCfg) !== before) chatterSchedule()
           }
+          // custom-pet：聊天选项配置（同样走顶层 talk，不进 config）。变了才重排计时。
+          if (d.talk) {
+            var beforeT = JSON.stringify(talkCfg)
+            talkCfg = d.talk
+            if (JSON.stringify(talkCfg) !== beforeT) talkSchedule()
+          } else {
+            // 宿主没给 talk（例如 DSH 插件端）：问一次规格兜底，拿不到就当关闭
+            try { talkLoadSpec() } catch (err) {}
+          }
         }
       })
       .catch(function () {})
@@ -11871,6 +11889,9 @@ gifEl.onerror = function () { gifFailed = true }
 bubbleBox.appendChild(textBox)
 bubbleBox.addEventListener('click', function (e) {
   e.stopPropagation()
+  // custom-pet：点到选项行时**什么也不做**（选项行自己已经 stopPropagation + 处理过了）。
+  // 这道判断是第二层保险：万一哪天选项行的监听被换掉，也不至于"点选项 = 顺手把泡泡推进一格"。
+  try { if (e.target && e.target.closest && e.target.closest('.dshwv-choice')) return } catch (err) {}
   if (!bubbleShown) return
   if (costBubbleActive) {
     // 消耗金额泡泡：点击关闭（确认）
@@ -12362,6 +12383,8 @@ function loadBubbleCfg() {
           bubbleTapAdvance = d.config.tapAdvance === true // v727
           applyBubbleCfgSeq()
           maybeBubbleMigratePeak()
+          // custom-pet：聊天选项配置（顶层 talk）。有就先用上，省一次 GET；没有则靠 talkLoadSpec 兜底。
+          if (d.talk) { talkCfg = d.talk; try { talkSchedule() } catch (err) {} }
         }
       })
       .catch(function () {})
@@ -13712,6 +13735,21 @@ function bubbleRowsTo(parentEl, mods) {
       })
     } catch (err) {}
   }
+  // custom-pet：把一行选项接成可点的。只在真实泡泡里接（textBox），气泡编辑器里的预览不接。
+  // 职责：开 pointer-events、拦住冒泡（否则会走到 bubbleBox 的「点泡泡 = 推进/收起」）、
+  // 把 data-choice-id 交给 talkChoose()。
+  function bindChoiceRow(el) {
+    try {
+      if (!parentEl || parentEl !== textBox) return
+      el.style.pointerEvents = 'auto'
+      el.style.cursor = 'pointer'
+      el.addEventListener('click', function (e) {
+        try { e.preventDefault() } catch (err) {}
+        try { e.stopPropagation() } catch (err) {}
+        try { talkChoose(el.getAttribute('data-choice-id') || '') } catch (err) {}
+      })
+    } catch (err) {}
+  }
   // 数据层行分组(bubbleRowsOf):平铺 modules[] → 视觉行;旧配置每模块一行
   var groups = bubbleRowsOf(mods)
   var rows = 0
@@ -13748,6 +13786,29 @@ function bubbleRowsTo(parentEl, mods) {
       im.draggable = false
       parentEl.appendChild(im)
       imgDone = true
+      continue
+    }
+    // custom-pet：聊天选项行（`choices` 模块）—— 一个模块画 optionCount 个**可点**的行。
+    // 为什么自己接管 DOM：.dshwv-text 是 pointer-events:none（点泡泡靠底下 SVG 接事件），
+    // 所以选项行必须自己开 pointer-events:auto 并 stopPropagation，
+    // 否则点选项会同时触发「点泡泡 = 推进/收起」那条既有链路。
+    if (grp[0] && grp[0].type === 'choices') {
+      var mch = grp[0]
+      var citems = Array.isArray(mch.items) ? mch.items : []
+      var marks = ['①', '②', '③', '④', '⑤', '⑥']
+      for (var ci = 0; ci < citems.length && rows < ROW_MAX; ci++) {
+        var cit = citems[ci] || {}
+        var cel = document.createElement('div')
+        cel.className = 'dshwv-trow dshwv-choice'
+        cel.style.fontSize = 'calc(var(--dshw-u) * ' + bubbleModuleFontU(mch.size) + ')'
+        if (mch.bold !== false) cel.style.fontWeight = '700'
+        // 一律 textContent：选项正文可能来自用户自己的 LLM（外部数据），不能当 HTML 写
+        cel.textContent = (marks[ci] || ((ci + 1) + '.')) + ' ' + String(cit.t || '')
+        cel.setAttribute('data-choice-id', String(cit.id || ''))
+        bindChoiceRow(cel)
+        parentEl.appendChild(cel)
+        rows++
+      }
       continue
     }
     // 一行超过 MOD_MAX 个模块时拆成多行(F2 每行至多 6;数据由编辑器保证,此处仅防御)
@@ -13904,8 +13965,13 @@ function bubblePreviewInto(container, mods, widthPx) {
 function whaleClick() {
   try {
     // custom-pet：点击她 = 重置主动说话窗口（2~5 分钟不点才触发，见 chatterTry）
+    //                  也是「聊天选项」的 idle 基准（默认 5 分钟不点才弹选项）
+    try { talkBaselineAt = Date.now() } catch (err) {}
     try { chatterSchedule() } catch (err) {}
+    try { talkSchedule() } catch (err) {}
     if (!bubbleOn) return
+    // custom-pet：选项泡在屏幕上时，点她不清掉它（选项只能被"点选项/点泡泡"收掉）
+    if (bubbleScene && bubbleScene.kind === 'talk') return
     if (bubbleScene && (bubbleScene.kind === 'cost' || bubbleScene.kind === 'alert')) return // 消耗/预警提醒期间点鲸鱼不动作(点泡泡才关)
     if (!bubbleShown) {
       bubbleRoundOn = true
@@ -13943,6 +14009,12 @@ function bubbleNext() {
     //（设计意图是"别让误点把'正在等待你回答'收掉"），但真机上用户就是想把它点掉 ⇒ 改成：
     // 点泡泡 = 收起，并记住"这条挂起已被点掉"，pollWaitState 不再自动弹回（回答/批准或下一次新挂起照常）。
     if (bubbleScene && bubbleScene.kind === 'wait') { dismissWaitBubble(); return }
+    // custom-pet：选项泡（kind:'talk'）—— 点泡泡本体 = 「被无视」。
+    // 有 token（正在给选项）时上报 ignored → 她会伤心；没有 token（正在播反应台词）时就是普通关掉。
+    if (bubbleScene && bubbleScene.kind === 'talk') {
+      try { talkChooseIgnored() } catch (err) { hideBubble() }
+      return
+    }
     // v761（#161 C5）曾在此处"等待交互泡泡点它不关"（必须等被回答/批准）——
     // v777 按用户反馈改成"可点关"，语义与实现见上面的 dismissWaitBubble()；这里不再拦截。
     if (bubbleRoundOn && bubbleSeqIdx < bubbleSeq.length) { bubbleShowSeqNext(); return }
@@ -15102,23 +15174,29 @@ function usageRecRefresh() {
 // ===== custom-pet：情绪系统（前端半区）=====
 // 计数与判定在宿主（pet-app/server.js 的 recordMoodClick），前端只负责：
 //   ① 每次「真点击」上报一次（拖拽不算 —— 能走到上报点本来就已过 drag.moved 判定）
-//   ② 按宿主返回的情绪切换角色图（生气 → /dsh-whale/mood-image.png）
+//   ② 按宿主返回的情绪切换角色图（不高兴 → /dsh-whale/mood-image.png）
 //   ③ 每 20 秒对一次表，消气后自动换回待机图
 // 为什么把计数放宿主：情绪要能"重启后继续生气"，必须落 config.json；前端只管上报。
+// 状态：normal | angry | jealous | sad（吃醋/伤心由「聊天选项」的反应写入，见下面的 talk 模块）。
+// 素材回落链（缺吃醋/伤心素材时借生气素材 → 角色图）在宿主的 /dsh-whale/mood-image.png 里做。
 var MOOD_URL = '/dsh-whale/mood.json'
 var MOOD_IMG_URL = '/dsh-whale/mood-image.png'
-var moodState = 'normal'     // normal | angry
+var moodState = 'normal'     // normal | angry | jealous | sad
 var moodLevel = 0
+var moodUntil = 0            // 该情绪期的绝对到期时刻（宿主下发；用来判断"这一轮不高兴"是否已经弹过选项）
 var moodPollTimer = null
 
+function moodIsDown() { return moodState !== 'normal' }
+
 function applyRoleImage() {
-  // 生气时用生气素材；否则用当前角色图。加 ?v= 破浏览器缓存（宿主已 no-store，这里是双保险）。
+  // 不高兴时用情绪素材；否则用当前角色图。加 ?v= 破浏览器缓存（宿主已 no-store，这里是双保险）。
   var url = currentRole && currentRole.url ? currentRole.url : IMG_URL
-  if (moodState === 'angry') url = MOOD_IMG_URL + '?v=' + Date.now()
+  if (moodIsDown()) url = MOOD_IMG_URL + '?v=' + Date.now()
   try { img.src = url } catch (err) {}
 }
 
-function setMood(state, level) {
+function setMood(state, level, until) {
+  if (until !== undefined) moodUntil = Number(until) || 0
   var changed = (state !== moodState) || (level !== moodLevel)
   moodState = state
   moodLevel = level || 0
@@ -15128,15 +15206,18 @@ function setMood(state, level) {
     hitFailed = false
     try { setupHitTest(img.src) } catch (err) {}
     // 情绪变化后立刻换泡泡队列：
-    //  · 刚生气 → 拉回生气台词池（宿主 /bubble.json 按情绪下发 source:'angry'）
+    //  · 刚不高兴 → 拉回对应情绪的台词池（宿主 /bubble.json 按情绪下发 source）
     //  · 刚消气 → 换回正常队列
     // 若泡泡正显示着，先收起，避免旧文案停在屏幕上；下次点击即用新队列。
     try { refreshBubbleCfgFromHost(function () {}) } catch (err) {}
     try { if (bubbleShown) hideBubble() } catch (err) {}
-    // 动作：进入生气 → 摇头一下 + 开启周期颤动；消气 → 停颤动、回呼吸
-    if (state === 'angry') {
+    // 动作：生气/吃醋 → 摇头一下 + 开启周期颤动；伤心 → 摇头（不颤动）；消气 → 停颤动、回呼吸
+    if (state === 'angry' || state === 'jealous') {
       try { runImgAnim('shake', 600) } catch (err) {}
       try { moodTrembleStart() } catch (err) {}
+    } else if (state === 'sad') {
+      try { moodTrembleStop() } catch (err) {}
+      try { runImgAnim('shake', 900) } catch (err) {}
     } else {
       try { moodTrembleStop() } catch (err) {}
     }
@@ -15144,20 +15225,35 @@ function setMood(state, level) {
   return changed
 }
 
+// 宿主推来的情绪快照（两种来源：点击上报的回收、聊天选项的反应回包）
+function applyMoodSnapshot(m) {
+  try {
+    if (!m || typeof m.state !== 'string') return false
+    return setMood(m.state, Number(m.level) || 0, Number(m.until) || 0)
+  } catch (err) { return false }
+}
+
 // click=true 记一次点击（可能因此生气）；false 只读当前情绪
+// 返回宿主给的情绪快照，调用方据此决定要不要"立刻弹聊天选项"
 function moodReport(click) {
   try {
-    fetch(MOOD_URL, {
+    return fetch(MOOD_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ click: click === true }),
     })
       .then(function (r) { return r.json() })
-      .then(function (d) { if (d && d.ok === true) setMood(d.state, d.level) })
-      .catch(function () {})
-  } catch (err) {}
+      .then(function (d) {
+        if (!d || d.ok !== true) return null
+        var changed = applyMoodSnapshot(d)
+        // 刚进入"不高兴" → 立刻弹选项（等跳跃/换图落定 900ms，见 talkOnMoodChange）
+        if (changed && moodIsDown()) { try { talkOnMoodChange() } catch (err) {} }
+        return d
+      })
+      .catch(function () { return null })
+  } catch (err) { return null }
 }
-function moodSync() { moodReport(false) }
+function moodSync() { try { moodReport(false) } catch (err) {} }
 function moodStartPoll() {
   try {
     if (moodPollTimer) return
@@ -15191,11 +15287,12 @@ function runImgAnim(name, ms) {
     }, ms)
   } catch (err) {}
 }
-// 生气期间的周期颤动：每 8s 一次 0.7s；正在做别的动作（跳跃/摇头）时跳过
+// 生气/吃醋期间的周期颤动：每 8s 一次 0.7s；正在做别的动作（跳跃/摇头）时跳过。
+// 伤心不颤动（那不是"气"，抖起来像还在生气）；素材未就位时"伤心"也会借生气图，靠不颤动区分。
 function moodTrembleStart() {
   if (moodTrembleTimer) return
   moodTrembleTimer = setInterval(function () {
-    if (moodState !== 'angry' || imgAnimTimer) return
+    if ((moodState !== 'angry' && moodState !== 'jealous') || imgAnimTimer) return
     runImgAnim('tremble', 700)
   }, 8000)
 }
@@ -15262,6 +15359,201 @@ function chatterTry() {
     chatterSchedule() // 说完排下一个窗口；没词也照排，避免卡死
   } catch (err) { chatterSchedule() }
 }
+// ===== custom-pet：聊天选项 + 吃醋 =====
+// 触发语义（与主动说话并存，互不抢占）：
+//   · 不高兴（生气/吃醋/伤心）→ **立刻**弹一次；同一情绪态在 angryRepeatMin 内不重复弹
+//     （连点升级档位会改 mood.until，所以闸门按"情绪态 + 时间"判，不按 until 判，免得越点越弹）
+//   · 正常状态 → 最后一次真点击起 idleMin 分钟（默认 5）没动静就弹
+//   · 忙（每轮消耗 / 余额预警 / 「等待提问·授权」常驻泡 / 菜单 / 拖拽）→ 30 秒后重试，
+//     **不重置** idleMin 基准（基准只由真点击或一次回答重置）
+// 泡泡：常驻（ttl 0），optionCount 个可点选项。三条出口：
+//   ① 点某个选项 → 播她对这句话的反应（气 / 吃醋 / 伤心 / 严肃 / 消气）
+//   ② answerTimeoutMs（默认 90s）没人理 → 视作"被无视" → 伤心
+//   ③ 点泡泡本体 → 同"被无视"（保持「点泡泡才关」的既有交互契约）
+// 选项正文与反应文案全部来自宿主的 presets/talk.json（或用户自己的 LLM），前端只负责画与点。
+var TALK_URL = '/dsh-whale/talk.json'
+var talkCfg = null            // { enabled, idleMin, optionCount, mode, answerTimeoutMs, angryRepeatMin, pending }
+var talkTimer = null
+var talkAnswerTimer = null
+var talkPending = false
+var talkToken = ''
+var talkBaselineAt = Date.now()   // 上一次"真互动"时刻（点她 / 答完一轮）
+var talkLastFiredAt = 0
+var talkLastFiredMood = ''
+
+function talkEnabled() { return !!(talkCfg && talkCfg.enabled !== false) }
+function talkIdleMs() {
+  var m = (talkCfg && Number(talkCfg.idleMin) > 0) ? Number(talkCfg.idleMin) : 5
+  return Math.round(m * 60000)
+}
+function talkRepeatMs() {
+  var m = (talkCfg && Number(talkCfg.angryRepeatMin) > 0) ? Number(talkCfg.angryRepeatMin) : 3
+  return Math.max(60000, Math.round(m * 60000))
+}
+function talkAnswerMs() {
+  var m = (talkCfg && Number(talkCfg.answerTimeoutMs) > 0) ? Number(talkCfg.answerTimeoutMs) : 90000
+  return Math.round(m)
+}
+function talkArmAnswer() {
+  talkClearAnswer()
+  talkAnswerTimer = setTimeout(function () {
+    talkAnswerTimer = null
+    // 90 秒没动静 = 被无视（同"点掉泡泡"）
+    if (talkToken) talkSend({ action: 'choose', token: talkToken, id: '', cause: 'ignored' })
+    else try { if (bubbleShown) hideBubble() } catch (err) {}
+  }, talkAnswerMs())
+}
+function talkClearAnswer() {
+  try { if (talkAnswerTimer) { clearTimeout(talkAnswerTimer); talkAnswerTimer = null } } catch (err) {}
+}
+// 重排：默认按 idleMin 分钟；忙/刚弹过时用 retryMs 短重试
+function talkSchedule(opt) {
+  try {
+    if (talkTimer) { clearTimeout(talkTimer); talkTimer = null }
+    if (!talkEnabled() || !bubbleOn) return
+    var ms = (opt && opt.retryMs) ? opt.retryMs : talkIdleMs()
+    talkTimer = setTimeout(function () { talkTimer = null; talkTry() }, ms)
+  } catch (err) {}
+}
+function talkBusy() {
+  if (costBubbleActive || menuOpen || (drag && drag.active)) return true
+  // 「等待提问 / 授权」与余额预警是**系统级**常驻泡，优先级高于她的聊天：不抢、等下一轮
+  if (bubbleScene && (bubbleScene.kind === 'wait' || bubbleScene.kind === 'alert')) return true
+  return false
+}
+function talkTry() {
+  try {
+    if (!talkEnabled() || !bubbleOn) return
+    if (talkPending) return
+    if (bubbleScene && bubbleScene.kind === 'talk') return        // 选项/反应泡已经开着
+    if (talkBusy()) { talkSchedule({ retryMs: 30000 }); return }
+    if (moodIsDown()) {
+      var rep = talkRepeatMs()
+      if (talkLastFiredMood === moodState && Date.now() - talkLastFiredAt < rep) { talkSchedule({ retryMs: rep }); return }
+    } else if (Date.now() - talkBaselineAt < talkIdleMs()) {
+      talkSchedule()
+      return
+    }
+    talkLastFiredAt = Date.now()
+    talkLastFiredMood = moodState
+    talkPending = true
+    // 先给一句"正在想"，等宿主回包再把选项换上去（接了 LLM 时这一步是必要的，不能干等 8 秒）
+    var pend = (talkCfg && Array.isArray(talkCfg.pending)) ? talkCfg.pending : null
+    if (pend && pend.length) {
+      try { sceneOpen('talk', function () { bubbleRenderModules([{ type: 'random', lines: pend }]) }, 0) } catch (err) {}
+    }
+    fetch(TALK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'open' }),
+    })
+      .then(function (r) { return r.json() })
+      .then(function (d) {
+        talkPending = false
+        if (!d || d.ok !== true || !Array.isArray(d.options) || !d.options.length) { talkHideAndReschedule(); return }
+        talkToken = String(d.token || '')
+        talkShowOptions(d)
+      })
+      .catch(function () { talkPending = false; talkHideAndReschedule() })
+  } catch (err) { talkPending = false; talkSchedule() }
+}
+function talkHideAndReschedule() {
+  talkToken = ''
+  talkClearAnswer()
+  try { if (bubbleShown) hideBubble() } catch (err) {}
+  talkSchedule()
+}
+// 宿主推来的情绪（点她之后）→ 立刻弹选项
+function talkOnMoodChange() {
+  try {
+    if (!talkEnabled() || !bubbleOn) return
+    setTimeout(function () { try { talkTry() } catch (err) {} }, 900)
+  } catch (err) {}
+}
+function talkShowOptions(d) {
+  try {
+    // 版式预算：文本框只有 677u × 448u，所以开场**只给一句**（size 4 ≈ 52u 字高），
+    // 三个选项也用 size 4 + 620u 限宽 —— 16 字的选项最多折成 2 行，整泡 ≈ 420u，塞得下。
+    var mods = []
+    var opening = Array.isArray(d.opening) ? d.opening : []
+    for (var i = 0; i < opening.length && i < 1; i++) {
+      mods.push({ type: 'text', text: String(opening[i].t || ''), size: 4, bold: true, row: i + 1 })
+    }
+    var items = []
+    var opts = Array.isArray(d.options) ? d.options : []
+    for (var j = 0; j < opts.length; j++) items.push({ id: String(opts[j].id || ''), t: String(opts[j].t || '') })
+    mods.push({ type: 'choices', items: items, size: 4, bold: true, row: opening.length + 1 })
+    sceneOpen('talk', function () { bubbleRenderModules(mods) }, 0)
+    talkArmAnswer()
+  } catch (err) { talkHideAndReschedule() }
+}
+function talkSend(payload) {
+  try {
+    talkClearAnswer()
+    var token = talkToken
+    talkToken = ''
+    fetch(TALK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload || { action: 'choose', token: token, id: '' }),
+    })
+      .then(function (r) { return r.json() })
+      .then(function (d) { talkShowReaction(d) })
+      .catch(function () { talkHideAndReschedule() })
+  } catch (err) { talkHideAndReschedule() }
+}
+function talkChoose(id) {
+  if (!talkToken) return
+  talkSend({ action: 'choose', token: talkToken, id: String(id || '') })
+}
+function talkChooseIgnored() {
+  if (!talkToken) { try { if (bubbleShown) hideBubble() } catch (err) {} return }
+  talkSend({ action: 'choose', token: talkToken, id: '', cause: 'ignored' })
+}
+// 反应：先按宿主回包换情绪/素材（吃醋 ← 提到别的 AI 娘时宿主会强制 jealous），再把台词铺上
+function talkShowReaction(d) {
+  try {
+    if (d && d.mood) applyMoodSnapshot(d.mood)
+    var lines = (d && Array.isArray(d.lines) && d.lines.length)
+      ? d.lines.map(function (l) { return { t: String(l.t || ''), w: Number(l.w) || 8 } })
+      : null
+    if (lines) {
+      sceneOpen('talk', function () { bubbleRenderModules([{ type: 'random', lines: lines }]) }, BUBBLE_MS)
+    } else if (bubbleShown) {
+      hideBubble()
+    }
+    if (d && d.action) {
+      try { runImgAnim(String(d.action), String(d.action) === 'tremble' ? 900 : 600) } catch (err) {}
+    }
+    // 答完这一轮 = 一次"真互动"：idle 基准与主动说话窗口一起重置
+    talkBaselineAt = Date.now()
+    try { chatterSchedule() } catch (err) {}
+    talkSchedule()
+  } catch (err) { talkSchedule() }
+}
+// 启动兜底：bubble.json 没带 talk（例如 DSH 插件端只登记路由、不实现）时问一次规格
+function talkLoadSpec() {
+  try {
+    fetch(TALK_URL, { cache: 'no-store' })
+      .then(function (r) { return r.json() })
+      .then(function (d) {
+        if (!d || d.ok !== true) return
+        if (talkCfg && talkCfg.enabled !== undefined) return   // bubble.json 已经给了，别覆盖
+        talkCfg = {
+          enabled: d.enabled === true,
+          idleMin: Number(d.idleMin) || 5,
+          optionCount: Number(d.optionCount) || 3,
+          answerTimeoutMs: Number(d.answerTimeoutMs) || 90000,
+          angryRepeatMin: Number(d.angryRepeatMin) || 3,
+          mode: d.mode || 'preset',
+          pending: [],
+        }
+        talkSchedule()
+      })
+      .catch(function () {})
+  } catch (err) {}
+}
+
 function setAudioBtnText(t) { try { audioGroupBtnLabel.textContent = t } catch (err) {} }
 // 名称悬停循环滚动：仅当文本溢出容器时，悬停到该行后名称无限循环滚动露出全名，
 // 移开停止并回位。双副本无缝循环：滚动距离 = 单份文本+间距，跳回起点时画面相同。
@@ -17318,6 +17610,9 @@ try { moodSync(); moodStartPoll() } catch (err) {}
 try { imgAnimSet('dshwv-a-breathe', true) } catch (err) {}
 // custom-pet：主动说话启动（先按默认间隔排班；宿主 chatter 配置到达后按实际值重排）
 try { chatterSchedule() } catch (err) {}
+// custom-pet：聊天选项启动（先拿一次规格兜底；bubble.json 带 talk 时会覆盖并重排）
+try { talkLoadSpec() } catch (err) {}
+try { talkSchedule() } catch (err) {}
 loadAudio()
 // 用量设置(任务结束音/预警/预算)加载,并据此初始化主菜单“任务结束”行
 loadUsageSettings(function () {

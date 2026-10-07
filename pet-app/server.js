@@ -21,7 +21,9 @@ const BACKUP_VERSION = 1
 
 // 允许写入 / 导出 / 导入的配置键（白名单）。config.json 是用户本机文件，
 // 不接受任意字段进来；新增字段时必须同时登记在这里，否则导出/导入会漏掉它。
-const CONFIG_KEYS = ['demo', 'dsKey', 'dsMode', 'role', 'autostart', 'widget', 'bubbleGpt', 'bubbleWhale', 'mood']
+//   · talk：只放**用户在本机改过的覆盖项**（enabled / idleMin）—— 选项池与台词在 presets/talk.json
+//   · llm ：自定义 LLM 提供商（可选）。apiKey 是明文，导出时默认剔除（见 /pet-backup.json）
+const CONFIG_KEYS = ['demo', 'dsKey', 'dsMode', 'role', 'autostart', 'widget', 'bubbleGpt', 'bubbleWhale', 'mood', 'talk', 'llm']
 
 // —— 情绪系统（已实现：点太频繁会生气，生气期间只回生气台词）——
 // 规则（用户 2026-10-07 定稿）：
@@ -40,6 +42,22 @@ const MOOD_TIERS = [
   { min: 25, level: 1, durationMs: 1 * 60 * 1000 },
 ]
 
+// —— 情绪状态（fork 定制：聊天选项 + 吃醋把「情绪」从两态扩到四态）——
+//   normal   待机
+//   angry    点太频繁 → 1/2/3 档，时长由档位决定（既有规则，一字未改）
+//   jealous  聊天选项里夸了别的 AI 娘 / 提到和别的 AI 娘互动（见 presets/talk.json 的 rivals）
+//   sad      聊天选项被敷衍，或选项泡被无视
+// `serious` / `calm` **不是**情绪，只是反应语气：serious = 回 normal 但语气变冷，calm = 消气回 normal。
+const MOOD_STATES = ['normal', 'angry', 'jealous', 'sad']
+// 该状态没有专属素材时借用谁：吃醋/伤心的表情素材用户后续会补，补完即自动生效（见 /dsh-whale/mood-image.png）
+const MOOD_STATE_FALLBACK = { jealous: 'angry', sad: 'angry' }
+const MOOD_LABEL = { normal: '待机', angry: '生气', jealous: '吃醋', sad: '伤心' }
+// 聊天反应 → 情绪：只有这三种反应会改情绪，serious/calm 一律回 normal
+const REACTION_MOOD = { angry: 'angry', jealous: 'jealous', sad: 'sad', serious: 'normal', calm: 'normal' }
+// 兜底时长/动作（presets/talk.json 的 reactions 优先，缺失时才用这里）
+const REACTION_HOLD_DEFAULT = { angry: 90000, jealous: 150000, sad: 60000, serious: 0, calm: 0 }
+const REACTION_ACTION_DEFAULT = { angry: 'shake', jealous: 'tremble', sad: 'shake', serious: 'jump', calm: 'jump' }
+
 function moodTierFor(count) {
   for (const t of MOOD_TIERS) {
     if (count >= t.min) return t
@@ -50,11 +68,29 @@ function moodTierFor(count) {
 /** 读当前情绪；已到期则返回 normal（不写盘，写盘交给调用方决定）。 */
 function currentMood() {
   const m = readConfig().mood
-  if (!m || m.state !== 'angry') return { state: 'normal', level: 0, until: 0, remainingMs: 0 }
+  const state = m && MOOD_STATES.indexOf(m.state) >= 0 ? m.state : 'normal'
+  if (state === 'normal') return { state: 'normal', level: 0, until: 0, remainingMs: 0 }
   const until = Number(m.until) || 0
   const remainingMs = until - Date.now()
   if (remainingMs <= 0) return { state: 'normal', level: 0, until: 0, remainingMs: 0, expired: true }
-  return { state: 'angry', level: Number(m.level) || 1, until, remainingMs }
+  return { state: state, level: Number(m.level) || 1, until, remainingMs }
+}
+
+/**
+ * 直接设定情绪（聊天选项的反应走这里）。
+ * holdMs <= 0 或不认识的 state ⇒ 回 normal；angry 的**档位**仍由 recordMoodClick 维护。
+ */
+function setMoodState(state, holdMs, meta) {
+  const st = MOOD_STATES.indexOf(state) >= 0 ? state : 'normal'
+  const ms = Number(holdMs) || 0
+  if (st === 'normal' || ms <= 0) {
+    writeConfig({ mood: { state: 'normal', until: 0, level: 0 } })
+  } else {
+    writeConfig({ mood: { state: st, until: Date.now() + ms, level: Number((meta && meta.level) || 0) } })
+    console.log('[dsh-pet] 情绪切换：' + MOOD_LABEL[st] + '，持续 ' + Math.round(ms / 1000) + ' 秒' +
+      (meta && meta.reason ? '（' + meta.reason + '）' : ''))
+  }
+  return currentMood()
 }
 
 // 点击时刻缓冲：**只留内存、不落盘**。若每次点击都写 config.json，25 次点击就是 25 次
@@ -68,6 +104,9 @@ function recordMoodClick() {
   moodClicks.push(now)
 
   const cur = currentMood()
+  // 吃醋/伤心是「聊天选项」选出来的结果，不该被连点悄悄覆盖掉：
+  // 它要么自然到期，要么被选项/哄好改掉。所以这两种状态下连点不改情绪。
+  if (cur.state !== 'normal' && cur.state !== 'angry') return cur
   const tier = moodTierFor(moodClicks.length)
 
   if (cur.state === 'angry') {
@@ -186,19 +225,25 @@ function defaultRoleId() {
 }
 function presetBubbles() { return loadPreset('bubbles.json', {}) }
 function presetWhaleDefaults() { return loadPreset('bubble-default-whale.json', null) }
+/** presets/talk.json 的 talk 段（聊天选项 + 吃醋）。读不到就给空对象 → 功能自动关闭。 */
+function presetTalk() {
+  const p = loadPreset('talk.json', {})
+  return (p && p.talk && typeof p.talk === 'object') ? p.talk : {}
+}
 
 // 热重载：清缓存后强制重读全部预设（文件缺失/写坏时 loadPreset 会沿用上次成功的值）
 function clearPresetCache() { presetCache.clear() }
 function reloadPresets() {
   clearPresetCache()
-  const names = ['roles.json', 'bubbles.json', 'bubble-default-whale.json']
+  const names = ['roles.json', 'bubbles.json', 'bubble-default-whale.json', 'talk.json']
   const out = {}
   for (const n of names) loadPreset(n, null, { force: true })
   out.roles = presetRoles().length
   out.bubbles = Object.keys(presetBubbles()).length
   out.whaleItems = (presetWhaleDefaults() || {}).count || 0
+  out.talkOptions = (presetTalk().options || []).length
   console.log('[dsh-pet] 预设已热重载：角色 ' + out.roles + ' 个 / 泡泡池 ' + out.bubbles +
-    ' 组 / 上游默认台词 ' + out.whaleItems + ' 项')
+    ' 组 / 上游默认台词 ' + out.whaleItems + ' 项 / 聊天选项 ' + out.talkOptions + ' 条')
   // Codex 额度缓存也一并失效：改完预设/素材后重新探测一次，免得看到旧值
   codexPlanCache = { at: 0, windows: null, planType: '', sessions: 0 }
   return out
@@ -416,14 +461,30 @@ function moodImagePrefix(roleId) {
 }
 
 /**
- * 生气台词泡泡：按档位取 presets/bubbles.json 的生气台词池。
- * 生气期间点角色仍有反应（不装死），但只回这些台词，不再走正常的余额/额度队列。
- * 台词池按角色分：gptAngry（gpt娘）/ whaleAngry（小鲸鱼）。
+ * 情绪台词泡泡：按**当前情绪**取 presets/bubbles.json 的台词池。
+ * 不高兴期间点角色仍有反应（不装死），但只回这些台词，不再走正常的余额/额度队列。
+ *
+ * 台词池按角色分，且两种形状都要支持：
+ *   · 生气：`gptAngry` / `whaleAngry` 是**按档位**分组的对象 `{"1":[...], "2":[...], "3":[...]}`
+ *   · 吃醋/伤心：`gptJealous` / `gptSad`（以及 whale 对应两组）是**扁平数组**（这两种情绪没有档位）
+ * 某个状态没有专属池时回落到同角色的生气池（按档位取），再取不到返回 null
+ * —— 调用方会继续走正常队列，不会静默变哑巴。
  */
-function angryQueue(level) {
+function moodQueue(mood) {
   const preset = presetBubbles()
-  const byRole = currentRoleId() === DEEPSEEK_ROLE_ID ? preset.whaleAngry : preset.gptAngry
-  const pool = (byRole || {})[String(level)] || (byRole || {})['1']
+  const whale = currentRoleId() === DEEPSEEK_ROLE_ID
+  const state = (mood && MOOD_STATES.indexOf(mood.state) >= 0 && mood.state !== 'normal') ? mood.state : 'angry'
+  const level = String((mood && mood.level) || 1)
+  const pools = whale
+    ? { angry: preset.whaleAngry, jealous: preset.whaleJealous, sad: preset.whaleSad }
+    : { angry: preset.gptAngry, jealous: preset.gptJealous, sad: preset.gptSad }
+  const pick = (p) => {
+    if (Array.isArray(p)) return p
+    if (p && typeof p === 'object') return p[level] || p['1'] || null
+    return null
+  }
+  let pool = pick(pools[state])
+  if ((!Array.isArray(pool) || !pool.length) && state !== 'angry') pool = pick(pools.angry)
   if (!Array.isArray(pool) || !pool.length) return null
   return {
     v: 1,
@@ -447,11 +508,11 @@ function bubblePayloadInner() {
   const role = currentRoleId()
   const cfg = readConfig()
   const preset = presetBubbles()
-  // 生气优先：任何角色在生气期间都只回生气台词
+  // 不高兴优先：生气/吃醋/伤心期间只回对应情绪的台词（吃醋/伤心没有专属池时回落到生气池）
   const mood = currentMood()
-  if (mood.state === 'angry') {
-    const q = angryQueue(mood.level)
-    if (q) return { ok: true, source: 'angry', config: q, mood }
+  if (mood.state !== 'normal') {
+    const q = moodQueue(mood)
+    if (q) return { ok: true, source: mood.state === 'angry' ? 'angry' : mood.state, config: q, mood }
   }
   if (role === DEEPSEEK_ROLE_ID) {
     if (cfg.bubbleWhale) return { ok: true, source: 'stored', config: cfg.bubbleWhale }
@@ -485,7 +546,358 @@ function bubblePayload() {
     }
     if (base.chatter.everyMax < base.chatter.everyMin) base.chatter.everyMax = base.chatter.everyMin
   }
+  // 聊天选项 + 吃醋：同样走**顶层字段、不进 config**（理由同 chatter）。
+  // 这里只下发"要不要开、隔多久、给几个、现在走预设还是 LLM"，选项正文在 open 时才取
+  // （见 /dsh-whale/talk.json）—— 省得每次拿泡泡配置都搬一遍选项池。
+  const tk = talkSpec()
+  const cfgLlm = llmConfig()
+  base.talk = {
+    enabled: !!(tk && tk.enabled !== false && Object.keys(tk).length),
+    idleMin: Number(tk.idleMin) > 0 ? Number(tk.idleMin) : 5,
+    optionCount: Math.max(1, Math.min(5, Number(tk.optionCount) || 3)),
+    answerTimeoutMs: Number(tk.answerTimeoutMs) > 0 ? Number(tk.answerTimeoutMs) : 90000,
+    angryRepeatMin: Number(tk.angryRepeatMin) > 0 ? Number(tk.angryRepeatMin) : 3,
+    // "正在想"那句：接了 LLM 时要等回包，先垫一句避免干等
+    pending: ((tk.opening && Array.isArray(tk.opening.pending)) ? tk.opening.pending : [])
+      .map((l) => ({ t: String(l.t || ''), w: Number(l.w) || 8 })),
+    mode: cfgLlm ? 'llm' : 'preset',
+  }
   return base
+}
+
+// ===== 聊天选项 + 吃醋（fork 定制）=====
+// 契约（前端只认这三条）：
+//   GET  /dsh-whale/talk.json                          → 规格 + 当前情绪（诊断 / 设置页 / 前端兜底）
+//   POST /dsh-whale/talk.json {action:'open'}          → { token, opening, options, source }
+//   POST /dsh-whale/talk.json {action:'choose', ...}   → { reaction, jealous, mood, lines, action, source }
+//
+// 两个设计决定：
+//   ① 选项池、开场白、反应文案、人设提示词的**唯一来源**是 presets/talk.json；
+//      config.json 的 talk 只放用户在本机改过的覆盖项（enabled / idleMin）。
+//   ② LLM 是**可选后端**：没配 / 超时 / HTTP 非 2xx / 返回不合法 JSON / 形状不对，
+//      一律静默回落预设（只在 console 留一行 warn，并把 source 标成 'preset'）。
+//      ⇒ 功能永远可用，接了 LLM 只是"每次选项都不一样"。
+let talkRecent = []   // 最近出现过的选项 id（环，长度 = spec.noRepeat）
+let talkLastSet = []  // 上一轮抽出的 id（排序），用来保证"每轮都不一样"
+let talkOpen = null   // { token, mood, options, at, source }
+
+/** 出厂规格（presets/talk.json 的 talk 段）+ 本机覆盖项（config.talk）。 */
+function talkSpec() {
+  const spec = Object.assign({}, presetTalk())
+  const c = readConfig().talk
+  if (c && typeof c === 'object') {
+    for (const k of ['enabled', 'idleMin', 'optionCount', 'noRepeat', 'angryRepeatMin',
+      'answerTimeoutMs', 'maxOptionChars', 'maxLineChars', 'maxLines']) {
+      if (c[k] !== undefined) spec[k] = c[k]
+    }
+  }
+  return spec
+}
+
+function talkFill(tpl, map) {
+  return String(tpl == null ? '' : tpl).replace(/\{(\w+)\}/g, (m, k) => (map[k] !== undefined ? String(map[k]) : m))
+}
+
+/** 你选的那句话里有没有别的 AI 娘的名字（大小写无关的子串匹配）。命中返回命中的别名。 */
+function talkRivalHit(text, rivals) {
+  const t = String(text || '').toLowerCase()
+  if (!t) return null
+  const list = Array.isArray(rivals) ? rivals : []
+  for (const r of list) {
+    const k = String(r || '').trim().toLowerCase()
+    if (k && t.indexOf(k) >= 0) return String(r)
+  }
+  return null
+}
+
+// 加权随机（无放回）：Efraimidis–Spirakis，key = U^(1/w) 取最大。
+// 选项没写 w 就按 8（等价均匀），跟 bubbles.json 里台词权重的口吻一致。
+function talkWeightedShuffle(list) {
+  return list
+    .map((o) => ({ o: o, k: Math.pow(Math.random(), 1 / Math.max(0.0001, Number(o.w) || 8)) }))
+    .sort((a, b) => b.k - a.k)
+    .map((x) => x.o)
+}
+
+/** 抽 optionCount 条：先按当前情绪过滤 when，再避开最近 noRepeat 条，且不与上一轮完全相同。 */
+function talkPick(spec, mood) {
+  const n = Math.max(1, Math.min(5, Number(spec.optionCount) || 3))
+  const all = Array.isArray(spec.options) ? spec.options.filter((o) => o && o.id && o.t) : []
+  const state = (mood && mood.state) || 'normal'
+  const elig = all.filter((o) => !o.when || o.when === 'any' || o.when === state)
+  if (elig.length < n) return []
+  let picked = []
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const fresh = elig.filter((o) => talkRecent.indexOf(o.id) < 0)
+    const src = fresh.length >= n ? fresh : elig
+    picked = talkWeightedShuffle(src).slice(0, n)
+    const ids = picked.map((o) => o.id).sort()
+    if (talkLastSet.join(',') !== ids.join(',')) break
+  }
+  return picked
+}
+
+function talkRemember(spec, ids) {
+  const cap = Math.max(3, Number(spec.noRepeat) || 8)
+  for (const id of ids) {
+    talkRecent = talkRecent.filter((x) => x !== id)
+    talkRecent.push(id)
+  }
+  while (talkRecent.length > cap) talkRecent.shift()
+}
+
+/** 开场白：优先当前情绪那组，**只取 1 句** —— 泡泡文本框只有 677u×448u，选项行要占掉大半。 */
+function talkOpening(spec, mood) {
+  const op = (spec.opening && typeof spec.opening === 'object') ? spec.opening : {}
+  const state = (mood && mood.state) || 'normal'
+  let pool = Array.isArray(op[state]) ? op[state] : []
+  if (!pool.length) pool = [].concat(op.normal || [], op.angry || [])
+  if (!pool.length) return []
+  return talkWeightedShuffle(pool).slice(0, 1).map((l) => ({ t: String(l.t || ''), w: Number(l.w) || 8 }))
+}
+
+// —— 可选 LLM 后端（OpenAI 兼容 /chat/completions；零依赖，照 fetchDsBalance 的写法）——
+function normalizeLlm(c) {
+  if (!c || c.enabled !== true) return null
+  const baseUrl = String(c.baseUrl || '').trim().replace(/\/+$/, '')
+  const model = String(c.model || '').trim()
+  const apiKey = String(c.apiKey || '').trim()
+  if (!baseUrl || !model || !apiKey) return null
+  let u
+  try { u = new URL(baseUrl) } catch (err) { return null }
+  // 只允许 http/https：别让用户把 file:/ftp: 之类塞进来当"提供商地址"
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
+  const timeoutMs = Math.max(1000, Math.min(60000, Number(c.timeoutMs) || 8000))
+  return { baseUrl: baseUrl, model: model, apiKey: apiKey, timeoutMs: timeoutMs }
+}
+function llmConfig() { return normalizeLlm(readConfig().llm) }
+
+/** 发一次 chat/completions。**永不 reject**：失败返回 null，调用方回落预设。 */
+function llmChat(cfg, messages) {
+  return new Promise((resolve) => {
+    let u
+    try { u = new URL(cfg.baseUrl + '/chat/completions') } catch (err) { return resolve(null) }
+    const mod = u.protocol === 'https:' ? https : http
+    const payload = JSON.stringify({
+      model: cfg.model,
+      messages: messages,
+      temperature: 0.9,
+      max_tokens: 400,
+      stream: false,
+    })
+    const req = mod.request({
+      hostname: u.hostname,
+      port: u.port || (u.protocol === 'https:' ? 443 : 80),
+      path: u.pathname + u.search,
+      method: 'POST',
+      timeout: cfg.timeoutMs,
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+        Authorization: 'Bearer ' + cfg.apiKey,
+        Accept: 'application/json',
+      },
+    }, (res) => {
+      let body = ''
+      res.setEncoding('utf8')
+      res.on('data', (c) => { body += c; if (body.length > 2e6) req.destroy() })
+      res.on('end', () => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          console.warn('[dsh-pet] LLM 返回 HTTP ' + res.statusCode + '，聊天选项回落到预设')
+          return resolve(null)
+        }
+        resolve(body)
+      })
+    })
+    req.on('timeout', () => req.destroy(new Error('LLM 请求超时')))
+    req.on('error', (err) => {
+      console.warn('[dsh-pet] LLM 请求失败（聊天选项回落到预设）：' + ((err && err.message) || err))
+      resolve(null)
+    })
+    req.write(payload)
+    req.end()
+  })
+}
+
+/** 从模型回复里抠出 JSON 对象（容忍 ```json 围栏与前后废话）。抠不出返回 null。 */
+function llmJson(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) return null
+  let text = raw
+  try {
+    const d = JSON.parse(raw)
+    const ch = d && Array.isArray(d.choices) ? d.choices[0] : null
+    const msg = ch && (ch.message || ch.delta)
+    if (msg && typeof msg.content === 'string') text = msg.content
+  } catch (err) { /* 不是 OpenAI 响应体：按纯文本处理 */ }
+  text = text.trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim()
+  const a = text.indexOf('{')
+  const b = text.lastIndexOf('}')
+  if (a < 0 || b <= a) return null
+  try { return JSON.parse(text.slice(a, b + 1)) } catch (err) { return null }
+}
+
+/** 让 LLM 生成一组选项。形状不合法（数量/长度/重复）就整体作废 → 回落预设。 */
+async function talkLlmOptions(spec, mood, cfg) {
+  const p = (spec.llmPrompt && typeof spec.llmPrompt === 'object') ? spec.llmPrompt : {}
+  if (!String(p.open || '').trim()) return null
+  const n = Math.max(1, Math.min(5, Number(spec.optionCount) || 3))
+  const maxChars = Math.max(6, Number(spec.maxOptionChars) || 40)
+  const raw = await llmChat(cfg, [
+    { role: 'system', content: String(p.system || '') },
+    {
+      role: 'user',
+      content: talkFill(p.open, {
+        mood: MOOD_LABEL[mood.state] || mood.state,
+        n: n,
+        maxChars: maxChars,
+        rivals: (Array.isArray(spec.rivals) ? spec.rivals : []).slice(0, 8).join('、'),
+      }),
+    },
+  ])
+  const obj = llmJson(raw)
+  if (!obj || !Array.isArray(obj.options)) return null
+  const options = []
+  for (const v of obj.options) {
+    const t = String(v == null ? '' : v).trim()
+    if (!t || t.length > maxChars) continue
+    if (options.some((x) => x.t === t)) continue
+    options.push({ id: 'llm' + (options.length + 1), t: t, reaction: '', lines: null })
+    if (options.length >= n) break
+  }
+  if (options.length < n) return null
+  const opening = (typeof obj.opening === 'string' && obj.opening.trim())
+    ? [{ t: obj.opening.trim().slice(0, maxChars * 2), w: 10 }]
+    : null
+  return { options: options, opening: opening }
+}
+
+/** 让 LLM 定一次反应语气与台词。reaction 必须是五个合法值之一，否则作废。 */
+async function talkLlmReaction(spec, mood, cfg, text) {
+  const p = (spec.llmPrompt && typeof spec.llmPrompt === 'object') ? spec.llmPrompt : {}
+  if (!String(p.react || '').trim()) return null
+  const maxChars = Math.max(6, Number(spec.maxLineChars) || 60)
+  const maxLines = Math.max(1, Math.min(6, Number(spec.maxLines) || 4))
+  const raw = await llmChat(cfg, [
+    { role: 'system', content: String(p.system || '') },
+    {
+      role: 'user',
+      content: talkFill(p.react, {
+        mood: MOOD_LABEL[mood.state] || mood.state,
+        option: text,
+        maxChars: maxChars,
+        maxLines: maxLines,
+      }),
+    },
+  ])
+  const obj = llmJson(raw)
+  if (!obj) return null
+  const reaction = String(obj.reaction || '').trim()
+  if (!REACTION_MOOD[reaction]) return null
+  const lines = []
+  for (const v of (Array.isArray(obj.lines) ? obj.lines : [])) {
+    const t = String(v == null ? '' : v).trim()
+    if (!t || t.length > maxChars) continue
+    lines.push({ t: t, w: 10 })
+    if (lines.length >= maxLines) break
+  }
+  return { reaction: reaction, lines: lines.length ? lines : null }
+}
+
+/** open：抽选项（必要时让 LLM 生成）+ 开场白，并把本轮锁进 talkOpen（token 一次性）。 */
+async function talkOpenPayload(spec, mood) {
+  const picked = talkPick(spec, mood)
+  if (!picked.length) return null
+  const token = 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+  let options = picked.map((o) => ({
+    id: o.id,
+    t: String(o.t),
+    reaction: REACTION_MOOD[o.reaction] ? o.reaction : '',
+    lines: Array.isArray(o.lines) && o.lines.length ? o.lines : null,
+    mentionsOther: o.mentionsOther === true,
+  }))
+  let opening = talkOpening(spec, mood)
+  let source = 'preset'
+  const cfg = llmConfig()
+  if (cfg) {
+    const r = await talkLlmOptions(spec, mood, cfg)
+    if (r) {
+      source = 'llm'
+      options = r.options
+      if (r.opening) opening = r.opening
+    }
+  }
+  if (!options.length) return null
+  const fill = { idle: Number(spec.idleMin) > 0 ? Number(spec.idleMin) : 5 }
+  opening = opening.map((l) => ({ t: talkFill(l.t, fill), w: l.w }))
+  // 只有预设 id 进"最近出现"环（LLM 选项每次本来就不一样，占环只会挤掉预设的名额）
+  talkRemember(spec, options.map((o) => o.id).filter((id) => String(id).indexOf('llm') !== 0))
+  talkLastSet = options.map((o) => String(o.id)).sort()
+  talkOpen = { token: token, mood: { state: mood.state, level: mood.level }, options: options, at: Date.now(), source: source }
+  return {
+    ok: true,
+    token: token,
+    source: source,
+    opening: opening,
+    options: options.map((o) => ({ id: o.id, t: o.t })),
+    mood: currentMood(),
+  }
+}
+
+/**
+ * choose：定反应 + 落情绪。
+ * 判定顺序（见 presets/talk.json 的 _说明）：
+ *   ① 你选的话命中 rivals（夸了/提到了别的 AI 娘）→ jealous（覆盖一切）
+ *   ② 选项自带 mentionsOther → jealous
+ *   ③ 选项自带的 reaction（预设）→ 用它
+ *   ④ 以上都没有（LLM 生成的选项）→ 问 LLM；LLM 不可用则"以牙还牙"用当前情绪，最后兜 serious
+ * cause='ignored'（点掉泡泡 / 90 秒不理）→ sad。
+ */
+async function talkResolve(spec, mood, option, cause) {
+  const ignored = !option || cause === 'ignored'
+  let reaction = ''
+  let lines = null
+  let source = 'preset'
+  let rival = null
+  if (ignored) {
+    // 点掉泡泡 / 90 秒不理她 = 被无视 → 伤心（**注意这里也要落情绪**，否则界面上看着伤心、
+    // 配置里还停在上一个状态，重启后变回原样 —— 实测踩过）
+    reaction = 'sad'
+  } else {
+    rival = talkRivalHit(option.t, spec.rivals)
+    reaction = rival ? 'jealous' : (option.mentionsOther ? 'jealous' : (REACTION_MOOD[option.reaction] ? option.reaction : ''))
+    lines = Array.isArray(option.lines) && option.lines.length ? option.lines : null
+    const cfg = llmConfig()
+    if (cfg && (!reaction || !lines)) {
+      const r = await talkLlmReaction(spec, mood, cfg, option.t)
+      if (r) {
+        source = 'llm'
+        if (!reaction) reaction = r.reaction
+        if (!lines && r.lines) lines = r.lines
+      }
+    }
+  }
+  if (!reaction) reaction = REACTION_MOOD[mood.state] ? mood.state : 'serious'
+  if (!lines) {
+    const rl = (spec.reactions && spec.reactions[reaction]) || {}
+    lines = Array.isArray(rl.lines) && rl.lines.length ? rl.lines : null
+  }
+  const rr = (spec.reactions && spec.reactions[reaction]) || {}
+  const holdMs = rr.holdMs !== undefined ? Number(rr.holdMs) : (REACTION_HOLD_DEFAULT[reaction] || 0)
+  const action = rr.action || REACTION_ACTION_DEFAULT[reaction] || 'jump'
+  const next = setMoodState(REACTION_MOOD[reaction] || 'normal', holdMs, {
+    reason: 'talk:' + reaction + (rival ? '(rival:' + rival + ')' : (ignored ? '(ignored)' : '')),
+  })
+  return {
+    reaction: reaction,
+    jealous: reaction === 'jealous',
+    source: source,
+    rival: rival,
+    optionId: option ? option.id : null,
+    text: option ? option.t : null,
+    lines: lines,
+    action: action,
+    mood: next,
+  }
 }
 
 function send(res, code, body, type) {
@@ -520,6 +932,29 @@ function handle(req, res) {
       if (typeof patch.dsKey === 'string') out.dsKey = patch.dsKey.trim()
       if (patch.dsMode === 'total' || patch.dsMode === 'topup') out.dsMode = patch.dsMode
       if (typeof patch.autostart === 'boolean') out.autostart = patch.autostart
+      // 聊天选项：只收"用户覆盖项"，选项池本体在 presets/talk.json
+      const curCfg = readConfig()
+      if (patch.talk && typeof patch.talk === 'object' && !Array.isArray(patch.talk)) {
+        const cur = (curCfg.talk && typeof curCfg.talk === 'object') ? curCfg.talk : {}
+        const next = Object.assign({}, cur)
+        if (typeof patch.talk.enabled === 'boolean') next.enabled = patch.talk.enabled
+        const im = Number(patch.talk.idleMin)
+        if (isFinite(im) && im >= 1) next.idleMin = Math.min(120, Math.round(im))
+        out.talk = next
+      }
+      // 自定义 LLM：apiKey 采用"留空=不改、null=清空"的写法，**不回显明文**
+      if (patch.llm && typeof patch.llm === 'object' && !Array.isArray(patch.llm)) {
+        const cur = (curCfg.llm && typeof curCfg.llm === 'object') ? curCfg.llm : {}
+        const next = Object.assign({}, cur)
+        if (typeof patch.llm.enabled === 'boolean') next.enabled = patch.llm.enabled
+        if (typeof patch.llm.baseUrl === 'string') next.baseUrl = patch.llm.baseUrl.trim()
+        if (typeof patch.llm.model === 'string') next.model = patch.llm.model.trim()
+        if (patch.llm.apiKey === null) next.apiKey = ''
+        else if (typeof patch.llm.apiKey === 'string' && patch.llm.apiKey.trim()) next.apiKey = patch.llm.apiKey.trim()
+        const ms = Number(patch.llm.timeoutMs)
+        if (isFinite(ms) && ms > 0) next.timeoutMs = Math.max(1000, Math.min(60000, Math.round(ms)))
+        out.llm = next
+      }
       const cfg = writeConfig(out)
       dsCache = { at: 0, data: null }
       send(res, 200, JSON.stringify({ ok: true, autostart: cfg.autostart === true }), MIME['.json'])
@@ -528,11 +963,30 @@ function handle(req, res) {
 
   if (p === '/pet-config.json') {
     const cfg = readConfig()
+    const LlmRaw = (cfg.llm && typeof cfg.llm === 'object') ? cfg.llm : {}
+    const TalkRaw = (cfg.talk && typeof cfg.talk === 'object') ? cfg.talk : {}
+    const spec = talkSpec()
     return send(res, 200, JSON.stringify({
       demo: cfg.demo === true,
       dsKey: cfg.dsKey || '',
       dsMode: cfg.dsMode === 'topup' ? 'topup' : 'total',
       autostart: cfg.autostart === true,
+      // 聊天选项：出厂默认来自 presets/talk.json，这里是"本机是否覆盖过 / 现在生效的值"
+      talk: {
+        enabled: spec.enabled !== false,
+        idleMin: Number(spec.idleMin) > 0 ? Number(spec.idleMin) : 5,
+        optionCount: Math.max(1, Math.min(5, Number(spec.optionCount) || 3)),
+        overridden: Object.keys(TalkRaw).length > 0,
+      },
+      // 自定义 LLM：**绝不回显明文 Key**，只告诉设置页"有没有存过"
+      llm: {
+        enabled: LlmRaw.enabled === true,
+        baseUrl: String(LlmRaw.baseUrl || ''),
+        model: String(LlmRaw.model || ''),
+        hasKey: !!String(LlmRaw.apiKey || '').trim(),
+        timeoutMs: Number(LlmRaw.timeoutMs) || 8000,
+        ready: !!normalizeLlm(LlmRaw),
+      },
     }), MIME['.json'])
   }
 
@@ -552,7 +1006,19 @@ function handle(req, res) {
     }
     for (const k of CONFIG_KEYS) {
       if (k === 'dsKey') {
-        if (includeKey && cfg.dsKey) backup.secret = { dsKey: cfg.dsKey }
+        if (includeKey && cfg.dsKey) backup.secret = Object.assign(backup.secret || {}, { dsKey: cfg.dsKey })
+        continue
+      }
+      if (k === 'llm') {
+        // 自定义 LLM 配置里含**明文 API Key**：默认整体剔除 apiKey，勾了 includeKey 才进 secret。
+        // 与 dsKey 同规则 —— "随手分享备份"不该顺带泄露凭据。
+        const L = (cfg.llm && typeof cfg.llm === 'object') ? Object.assign({}, cfg.llm) : null
+        if (L) {
+          const key = String(L.apiKey || '')
+          delete L.apiKey
+          backup.config.llm = L
+          if (includeKey && key) backup.secret = Object.assign(backup.secret || {}, { llm: { apiKey: key } })
+        }
         continue
       }
       if (cfg[k] !== undefined) backup.config[k] = cfg[k]
@@ -590,12 +1056,25 @@ function handle(req, res) {
           (!src[k] || typeof src[k] !== 'object' || Array.isArray(src[k]))) continue
         // mood 也允许随备份走：换机后"继续生气"能还原（until 是绝对时间戳，过期即自动消气）
         if (k === 'mood' && (!src[k] || typeof src[k] !== 'object' || Array.isArray(src[k]))) continue
+        if (k === 'talk' && (!src[k] || typeof src[k] !== 'object' || Array.isArray(src[k]))) continue
+        // llm 单独处理：它可能带 apiKey，不跟着 config 循环无条件落盘
+        if (k === 'llm') continue
         patch[k] = src[k]
         applied.push(k)
       }
       if (backup.secret && typeof backup.secret.dsKey === 'string' && backup.secret.dsKey.trim()) {
         patch.dsKey = backup.secret.dsKey.trim()
         applied.push('dsKey')
+      }
+      // 自定义 LLM：config 部分（不含 Key）照常还原；Key 只从 secret 里取
+      if (src.llm && typeof src.llm === 'object' && !Array.isArray(src.llm)) {
+        const prev = (readConfig().llm && typeof readConfig().llm === 'object') ? readConfig().llm : {}
+        patch.llm = Object.assign({}, prev, src.llm)
+        applied.push('llm')
+      }
+      if (backup.secret && backup.secret.llm && typeof backup.secret.llm.apiKey === 'string' && backup.secret.llm.apiKey.trim()) {
+        patch.llm = Object.assign({}, patch.llm || readConfig().llm || {}, { apiKey: backup.secret.llm.apiKey.trim() })
+        if (applied.indexOf('llm') < 0) applied.push('llm')
       }
       if (!applied.length) {
         return send(res, 400, '{"ok":false,"error":"备份里没有可应用的字段"}', MIME['.json'])
@@ -651,6 +1130,46 @@ function handle(req, res) {
     })
   }
 
+  // —— 自定义 LLM：测试连接（设置页用）——
+  // 与 /pet-test-ds 同思路：用**输入框里的值优先、留空则用已保存的**真发一次请求，
+  // 把"配好了没 / 端点通不通 / 返回能不能用"直接显示出来，不用先保存。
+  // 只回生成结果与错误码，不回显 Key。
+  if (p === '/pet-test-llm' && req.method === 'POST') {
+    return readBody(req, (body) => {
+      let patch = {}
+      try { patch = JSON.parse(body || '{}') || {} } catch (err) {}
+      const saved = (readConfig().llm && typeof readConfig().llm === 'object') ? readConfig().llm : {}
+      const merged = Object.assign({}, saved, { enabled: true })
+      if (typeof patch.baseUrl === 'string' && patch.baseUrl.trim()) merged.baseUrl = patch.baseUrl.trim()
+      if (typeof patch.model === 'string' && patch.model.trim()) merged.model = patch.model.trim()
+      if (typeof patch.apiKey === 'string' && patch.apiKey.trim()) merged.apiKey = patch.apiKey.trim()
+      const cfg = normalizeLlm(merged)
+      if (!cfg) {
+        return send(res, 200, JSON.stringify({
+          ok: false, code: 'NO_LLM',
+          error: '还没配齐：baseUrl / 模型名 / API Key 三项都要有（地址必须是 http/https）',
+        }), MIME['.json'])
+      }
+      const spec = talkSpec()
+      talkLlmOptions(spec, currentMood(), cfg).then((r) => {
+        if (!r) {
+          return send(res, 200, JSON.stringify({
+            ok: false, code: 'LLM_FAIL',
+            error: '调用失败，或返回不符合格式（已自动回落预设）。检查 baseUrl / 模型名 / Key 是否正确',
+            model: cfg.model,
+          }), MIME['.json'])
+        }
+        send(res, 200, JSON.stringify({
+          ok: true, model: cfg.model, opening: r.opening, options: r.options.map((x) => x.t),
+        }), MIME['.json'])
+      }).catch((err) => {
+        send(res, 200, JSON.stringify({
+          ok: false, code: 'LLM_FATAL', error: String((err && err.message) || err).slice(0, 300),
+        }), MIME['.json'])
+      })
+    })
+  }
+
   // —— 热重载 ——
   // GET /dsh-whale/reload：清预设缓存并强制重读（前端发现文件变化时自动调；也可手动调）
   // 返回各预设的条目数，便于确认"到底重载到了什么"。纯读操作，不改任何用户配置。
@@ -689,13 +1208,21 @@ function handle(req, res) {
     })), MIME['.json'])
   }
   if (p === '/dsh-whale/mood-image.png') {
-    // 情绪素材按角色成套：gpt娘 → gpt-{idle,angry}.png，小鲸鱼 → whale-{idle,angry}.png。
-    // 文件名前缀就是 presets/roles.json 里的角色 id（default 用 gpt 前缀，与生成脚本的 --name 对应）。
+    // 情绪素材按角色成套：gpt娘 → gpt-{idle,angry,jealous,…}.png，小鲸鱼 → whale-*.png。
+    // 文件名前缀就是 presets/roles.json 里的角色 id（default 用 gpt 前缀，与生成脚本的 --prefix 对应）。
+    // 取图走**回落链**：state → 该 state 的借用目标（吃醋/伤心暂时借生气素材）→ idle → 角色图。
+    // 用户后续补了 mood/gpt-jealous.png 就自动生效，不用改代码。
     const mood = currentMood()
-    const state = mood.state === 'angry' ? 'angry' : 'idle'
     const prefix = moodImagePrefix(currentRoleId())
-    const f = path.join(ASSETS, 'mood', prefix + '-' + state + '.png')
-    if (fs.existsSync(f)) return sendFile(res, f)
+    const chain = []
+    const want = mood.state === 'normal' ? 'idle' : mood.state
+    chain.push(want)
+    if (MOOD_STATE_FALLBACK[want]) chain.push(MOOD_STATE_FALLBACK[want])
+    if (chain.indexOf('idle') < 0) chain.push('idle')
+    for (const s of chain) {
+      const f = path.join(ASSETS, 'mood', prefix + '-' + s + '.png')
+      if (fs.existsSync(f)) return sendFile(res, f)
+    }
     // 该角色没有成套素材 → 回退到它的角色图（等价于"永远待机"，不会 404）
     const role = presetRoles().find((r) => r.id === currentRoleId())
     if (role && role.image && fs.existsSync(path.join(ASSETS, String(role.image)))) {
@@ -706,6 +1233,85 @@ function handle(req, res) {
     const candidates = [def && def.image, 'DSniang1.png', 'DSniang02.png'].filter(Boolean)
     const hit = candidates.map((x) => path.join(ASSETS, String(x))).find((x) => fs.existsSync(x))
     return hit ? sendFile(res, hit) : send(res, 404, 'image missing')
+  }
+
+  // —— 聊天选项 + 吃醋（桌宠端；DSH 插件端只登记路由、返回 enabled:false）——
+  // GET  = 规格 + 当前情绪（设置页 / 诊断 / 前端兜底）
+  // POST = {action:'open'} 抽选项；{action:'choose', token, id} 定反应并落情绪
+  //        id 为空或 cause:'ignored' = 「被无视」（点掉泡泡 / 90 秒不理她）→ 走 sad
+  if (p === '/dsh-whale/talk.json') {
+    const spec = talkSpec()
+    if (req.method === 'GET') {
+      const cfgLlm = llmConfig()
+      return send(res, 200, JSON.stringify({
+        ok: true,
+        scope: 'pet-app',
+        enabled: !!(spec.enabled !== false && Object.keys(spec).length),
+        idleMin: Number(spec.idleMin) > 0 ? Number(spec.idleMin) : 5,
+        optionCount: Math.max(1, Math.min(5, Number(spec.optionCount) || 3)),
+        answerTimeoutMs: Number(spec.answerTimeoutMs) > 0 ? Number(spec.answerTimeoutMs) : 90000,
+        angryRepeatMin: Number(spec.angryRepeatMin) > 0 ? Number(spec.angryRepeatMin) : 3,
+        pending: ((spec.opening && Array.isArray(spec.opening.pending)) ? spec.opening.pending : [])
+          .map((l) => ({ t: String(l.t || ''), w: Number(l.w) || 8 })),
+        mode: cfgLlm ? 'llm' : 'preset',
+        mood: currentMood(),
+        recent: talkRecent.slice(),
+        options: (Array.isArray(spec.options) ? spec.options : []).length,
+      }), MIME['.json'])
+    }
+    if (req.method !== 'POST') return send(res, 405, '{"ok":false}', MIME['.json'])
+    return readBody(req, (body) => {
+      let reqBody = {}
+      try { reqBody = JSON.parse(body || '{}') || {} } catch (err) { return send(res, 400, '{"ok":false,"error":"body 不是合法 JSON"}', MIME['.json']) }
+      if (spec.enabled === false || !Object.keys(spec).length) {
+        return send(res, 200, JSON.stringify({ ok: false, enabled: false, error: '聊天选项未启用' }), MIME['.json'])
+      }
+      const mood = currentMood()
+      if (reqBody.action === 'choose') {
+        if (!talkOpen || reqBody.token !== talkOpen.token) {
+          // token 一次性：重复点同一条选项（双击/连点）在这里被挡住，不会连着降两次情绪
+          return send(res, 409, JSON.stringify({ ok: false, error: '选项已过期（token 不匹配）' }), MIME['.json'])
+        }
+        const cause = reqBody.cause === 'ignored' ? 'ignored' : ''
+        const id = reqBody.id == null ? '' : String(reqBody.id)
+        let option = null
+        if (!cause && id) {
+          option = (Array.isArray(talkOpen.options) ? talkOpen.options : []).find((o) => o.id === id) || null
+          if (!option) return send(res, 400, JSON.stringify({ ok: false, error: '没有这个选项' }), MIME['.json'])
+        }
+        const openMood = talkOpen.mood || { state: mood.state, level: mood.level }
+        const used = talkOpen
+        talkOpen = null
+        return talkResolve(spec, openMood, option, cause || (id ? '' : 'ignored')).then((r) => {
+          console.log('[dsh-pet] 聊天选项：' + (r.optionId ? r.optionId + ' ' : '(被无视) ') +
+            '→ ' + r.reaction + '（' + r.source + '）')
+          send(res, 200, JSON.stringify(Object.assign({ ok: true, optionCount: (used.options || []).length }, r)), MIME['.json'])
+        }).catch((err) => {
+          console.warn('[dsh-pet] 聊天反应解析失败：' + ((err && err.message) || err))
+          send(res, 200, JSON.stringify({ ok: false, error: '反应解析失败' }), MIME['.json'])
+        })
+      }
+      // action === 'open'（缺省也是 open）
+      if (talkOpen && Date.now() - talkOpen.at < 1000 * 30) {
+        // 30 秒内已经开过一轮：**复用**同一个 token（避免前端重复请求把选项换掉）
+        return send(res, 200, JSON.stringify({
+          ok: true,
+          token: talkOpen.token,
+          source: talkOpen.source,
+          opening: talkOpening(spec, mood),
+          options: talkOpen.options.map((o) => ({ id: o.id, t: o.t })),
+          mood: currentMood(),
+          reused: true,
+        }), MIME['.json'])
+      }
+      return talkOpenPayload(spec, mood).then((payload) => {
+        if (!payload) return send(res, 200, JSON.stringify({ ok: false, error: '没有可用的聊天选项（检查 presets/talk.json）' }), MIME['.json'])
+        send(res, 200, JSON.stringify(payload), MIME['.json'])
+      }).catch((err) => {
+        console.warn('[dsh-pet] 聊天选项生成失败：' + ((err && err.message) || err))
+        send(res, 200, JSON.stringify({ ok: false, error: '聊天选项生成失败' }), MIME['.json'])
+      })
+    })
   }
 
   if (p === '/dsh-whale/balance.json') {
@@ -870,10 +1476,18 @@ module.exports = {
   currentMood,
   resetMoodState() {
     moodClicks = []
+    // 聊天选项的"最近出现过"环也是纯内存态，一并清掉，让测试不受上一例影响
+    talkRecent = []
+    talkLastSet = []
+    talkOpen = null
     writeConfig({ mood: { state: 'normal', until: 0, level: 0 } })
     return currentMood()
   },
   MOOD_TIERS,
+  MOOD_STATES,
+  // 聊天选项 + 吃醋：供测试直接读取规格/切情绪（HTTP 路由见 /dsh-whale/talk.json）
+  setMoodState,
+  talkSpec,
 }
 
 if (require.main === module) {

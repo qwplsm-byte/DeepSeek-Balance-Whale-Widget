@@ -30,12 +30,29 @@
 用法：
   python tools/make-mood-sprites.py --ref <运行时idle图> --angry <生气原图> --prefix gpt
   # 输出 <out-dir>/<prefix>-idle.png 与 <prefix>-angry.png（同画布尺寸）
+
+多态（吃醋 / 伤心等）：`--angry` 是 `--state angry=<图>` 的等价简写，可以重复给 `--state`：
+
+  python tools/make-mood-sprites.py --ref pet-app/assets/DSniang1.png --prefix gpt \
+      --state jealous=pet-app/assets/mood-src/jealous.jpg \
+      --state sad=pet-app/assets/mood-src/sad.jpg
+
+**所有状态都共用同一张 idle 基准图与同一块画布** —— 这是多态不跳位的前提：
+每个状态各自按头宽归一化、各自贴死画布右下角，画布尺寸取所有状态里最大的那个。
 """
 import argparse
 import os
+import sys
 from collections import deque
 
 from PIL import Image
+
+# Windows 控制台默认 GBK，脚本里的 ✓ 等字符会让**成功的一轮在最后一行 print 崩掉**
+# （退出码非 0 ⇒ 看起来像生成失败，实际文件已经写好了）。这里把 stdout 固定成 UTF-8。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 FINE_TOL = 38
 COARSE_TOL = 95
@@ -211,10 +228,39 @@ def strip_background(img, label, verbose):
     return img, body
 
 
+def state_args(args):
+    """
+    状态清单：`--angry <图>` 是 `--state angry=<图>` 的简写（旧命令一字不改仍可用），
+    `--state` 可重复，用来加第三/第四态（吃醋 / 伤心 …）。
+    """
+    out = []
+    if args.angry:
+        out.append(("angry", args.angry))
+    for raw in (args.state or []):
+        if "=" not in raw:
+            raise SystemExit("--state 必须写成 <名字>=<图片路径>，收到：%s" % raw)
+        name, src = raw.split("=", 1)
+        name, src = name.strip(), src.strip()
+        if not name or not src:
+            raise SystemExit("--state 必须写成 <名字>=<图片路径>，收到：%s" % raw)
+        if name == "idle":
+            raise SystemExit("状态名不能用 idle（idle 就是 --ref 那张基准图本身）")
+        out.append((name, src))
+    if not out:
+        raise SystemExit("至少给一个状态：--angry <图>，或 --state <名字>=<图>")
+    names = [n for n, _ in out]
+    dup = sorted({n for n in names if names.count(n) > 1})
+    if dup:
+        raise SystemExit("同一个状态给了多张图：" + ", ".join(dup))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ref", required=True, help="运行时真正使用的 idle 图（挂件 idle 走的那张）")
-    ap.add_argument("--angry", required=True, help="生气原图（黑底 + 内嵌气泡）")
+    ap.add_argument("--angry", help="生气原图（黑底 + 内嵌气泡）；等价于 --state angry=<图>")
+    ap.add_argument("--state", action="append", default=[], metavar="NAME=PATH",
+                    help="额外状态原图，可重复，如 --state jealous=pet-app/assets/mood-src/jealous.jpg")
     ap.add_argument("--prefix", required=True, help="输出前缀，如 gpt / whale")
     ap.add_argument("--out-dir", default="pet-app/assets/mood")
     ap.add_argument("--quiet", action="store_true")
@@ -224,94 +270,105 @@ def main():
     out_dir = args.out_dir if os.path.isabs(args.out_dir) else os.path.join(root, args.out_dir)
     os.makedirs(out_dir, exist_ok=True)
     v = not args.quiet
+    states = state_args(args)
 
     # —— 基准：运行时 idle 图 ——
     ref = Image.open(args.ref).convert("RGBA")
     ref_box = content_bbox(ref, alpha_only=True)
     ref_h = ref_box[3] - ref_box[1] + 1
-    print("[ref] %s  %dx%d  内容 bbox %s（高 %d）" % (args.ref, ref.width, ref.height, ref_box, ref_h))
+    ref_head = head_width(ref)
+    assert ref_head > 0, "基准图测不到头部宽度"
+    # idle（ref）主体尺寸
+    bw_r = ref_box[2] - ref_box[0] + 1
+    bh_r = ref_box[3] - ref_box[1] + 1
+    print("[ref] %s  %dx%d  内容 bbox %s（高 %d，头宽 %d）"
+          % (args.ref, ref.width, ref.height, ref_box, ref_h, ref_head))
 
-    # —— 生气图：去黑底 / 剔气泡 / 留怒火标记 ——
-    angry_raw = Image.open(args.angry).convert("RGBA")
-    print("[angry] %s  %dx%d" % (args.angry, angry_raw.width, angry_raw.height))
-    angry, body = strip_background(angry_raw, "angry", v)
-    assert body, "没有识别出角色主体"
-    body_h = body[3] - body[1] + 1
-    print("  角色主体 bbox %s（高 %d）" % (body, body_h))
-
-    # —— 等比缩放生气图：**头部宽度**对齐 idle 的头部宽度 ——
-    # 不用身体高度：两态姿势不同（idle 紧裁胸像、angry 常露出更多肩膀/发尾），
+    # —— 每个状态：去黑底 / 剔气泡 / 留怒火标记，再按**头部宽度**归一化 ——
+    # 不用身体高度：各状态姿势不同（idle 紧裁胸像、生气常露出更多肩膀/发尾），
     # 身体高度不可比。头宽才是眼睛判断"角色多大"的依据：
     # 实测 gpt 两图头宽都是 847（比值 1.0000），小鲸鱼却是 462 vs 572（0.8077）——
     # 后者切换时头像会大 24%，看起来就是"第二态没裁剪好"。
-    ref_head = head_width(ref)
-    angry_head = head_width(angry)
-    assert ref_head > 0 and angry_head > 0, "测不到头部宽度"
-    scale = ref_head / float(angry_head)
-    all_box = content_bbox(angry, alpha_only=True)
-    patch = angry.crop((all_box[0], all_box[1], all_box[2] + 1, all_box[3] + 1))
-    new_w = max(1, int(round(patch.width * scale)))
-    new_h = max(1, int(round(patch.height * scale)))
-    patch = patch.resize((new_w, new_h), Image.LANCZOS)
-    # 主体在该块内的落点（同比例）
-    off_x = int(round((body[0] - all_box[0]) * scale))
-    off_y = int(round((body[1] - all_box[1]) * scale))
-    print("  头部宽 idle %d / angry %d → 缩放 %.4f；内容 → %dx%d"
-          % (ref_head, angry_head, scale, new_w, new_h))
+    prepared = []
+    for name, src in states:
+        raw = Image.open(src).convert("RGBA")
+        print("[%s] %s  %dx%d" % (name, src, raw.width, raw.height))
+        img, body = strip_background(raw, name, v)
+        assert body, "没有识别出角色主体（%s）" % name
+        body_h = body[3] - body[1] + 1
+        print("  角色主体 bbox %s（高 %d）" % (body, body_h))
+        hd = head_width(img)
+        assert hd > 0, "测不到头部宽度（%s）" % name
+        scale = ref_head / float(hd)
+        all_box = content_bbox(img, alpha_only=True)
+        patch = img.crop((all_box[0], all_box[1], all_box[2] + 1, all_box[3] + 1))
+        new_w = max(1, int(round(patch.width * scale)))
+        new_h = max(1, int(round(patch.height * scale)))
+        patch = patch.resize((new_w, new_h), Image.LANCZOS)
+        # 主体在该块内的落点（同比例）
+        off_x = int(round((body[0] - all_box[0]) * scale))
+        off_y = int(round((body[1] - all_box[1]) * scale))
+        # 该状态主体在缩放后的实际尺寸
+        bw = max(1, int(round((body[2] - body[0] + 1) * scale)))
+        bh = max(1, int(round((body[3] - body[1] + 1) * scale)))
+        print("  头部宽 idle %d / %s %d → 缩放 %.4f；内容 → %dx%d"
+              % (ref_head, name, hd, scale, new_w, new_h))
+        prepared.append({"name": name, "patch": patch, "off_x": off_x, "off_y": off_y, "bw": bw, "bh": bh})
 
-    # —— 让两态的主体都**贴死画布右下角**（挂件是 right bottom 对齐）——
+    # —— 让所有状态的主体都**贴死画布右下角**（挂件是 right bottom 对齐）——
     # 这是"第二态看着没裁剪好"的真正修法：
     #   挂件用 object-fit:contain + object-position:right bottom。因此
-    #     · 画布尺寸决定缩放比（两个状态必须同画布）
+    #     · 画布尺寸决定缩放比（所有状态必须同画布）
     #     · 主体相对画布右下角的位置必须一致（都贴死右下角）
     #   否则切换时角色会缩放 + 位移。
     # 实测踩到的形态：idle 用 ds-whale.png（主体右边距 0）而 angry 主体更宽，
     # 老实现把 idle 直接贴进更大的画布 ⇒ idle 右边距变成 80px，切换时右移约 43px。
-    # 生气图主体在缩放后的实际尺寸
-    bw_a = max(1, int(round((body[2] - body[0] + 1) * scale)))
-    bh_a = max(1, int(round((body[3] - body[1] + 1) * scale)))
-    # idle（ref）主体尺寸
-    bw_r = ref_box[2] - ref_box[0] + 1
-    bh_r = ref_box[3] - ref_box[1] + 1
+    #
+    # 画布最小尺寸：保证每个状态「主体贴右下角」时都不越界（多态时取所有状态的最大值）
+    W = max([bw_r + ref_box[0]] + [p["bw"] + p["off_x"] for p in prepared] + [1])
+    H = max([bh_r + ref_box[1]] + [p["bh"] + p["off_y"] for p in prepared] + [1])
 
-    # 画布最小尺寸：保证两态各自「主体贴右下角」时都不越界
-    W = max(bw_a + off_x, bw_r + ref_box[0], 1)
-    H = max(bh_a + off_y, bh_r + ref_box[1], 1)
-
-    # 生气图：patch 放这里 => 主体右下角 = (W-1, H-1)
-    ax = W - bw_a - off_x
-    ay = H - bh_a - off_y
     # idle：ref 放这里 => 主体右下角 = (W-1, H-1)
     rx = W - bw_r - ref_box[0]
     ry = H - bh_r - ref_box[1]
-    assert ax >= 0 and ay >= 0, "画布算错：生气图放不下（ax=%d ay=%d）" % (ax, ay)
     assert rx >= 0 and ry >= 0, "画布算错：idle 放不下（rx=%d ry=%d）" % (rx, ry)
-
     canvas_idle = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     canvas_idle.paste(ref, (rx, ry), ref)
-    canvas_angry = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    canvas_angry.paste(patch, (ax, ay), patch)
-    print("  画布 %dx%d；主体右下角对齐: idle(%d,%d) angry(%d,%d)"
-          % (W, H, rx + ref_box[2], ry + ref_box[3], ax + off_x + bw_a - 1, ay + off_y + bh_a - 1))
-    print("  主体尺寸: idle %dx%d / angry %dx%d" % (bw_r, bh_r, bw_a, bh_a))
 
-    # —— 断言：两态**头部宽度**必须一致（挂件上看到的大小才一致）——
+    canvases = [("idle", canvas_idle, (rx + ref_box[2], ry + ref_box[3]), bw_r, bh_r)]
+    print("  画布 %dx%d；主体尺寸 idle %dx%d；右下角 idle(%d,%d)"
+          % (W, H, bw_r, bh_r, rx + ref_box[2], ry + ref_box[3]))
+    for p in prepared:
+        px = W - p["bw"] - p["off_x"]
+        py = H - p["bh"] - p["off_y"]
+        assert px >= 0 and py >= 0, "画布算错：%s 放不下（px=%d py=%d）" % (p["name"], px, py)
+        c = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        c.paste(p["patch"], (px, py), p["patch"])
+        canvases.append((p["name"], c, (px + p["off_x"] + p["bw"] - 1, py + p["off_y"] + p["bh"] - 1), p["bw"], p["bh"]))
+        print("  主体尺寸 %s %dx%d；右下角 %s(%d,%d)"
+              % (p["name"], p["bw"], p["bh"], p["name"],
+                 px + p["off_x"] + p["bw"] - 1, py + p["off_y"] + p["bh"] - 1))
+
+    # —— 断言：每个状态与 idle 的**头部宽度**必须一致（挂件上看到的大小才一致）——
+    def_anchor = canvases[0][2]
     ih2 = head_width(canvas_idle)
-    ah2 = head_width(canvas_angry)
-    if abs(ih2 - ah2) > 2:
-        raise SystemExit("对齐失败：两态头部宽度不一致 %d vs %d" % (ih2, ah2))
-    if (rx + ref_box[2], ry + ref_box[3]) != (ax + off_x + bw_a - 1, ay + off_y + bh_a - 1):
-        raise SystemExit("对齐失败：两态主体右下角不一致")
-    print("  头部宽度校验：idle %d / angry %d（差 %d px，已断言）" % (ih2, ah2, abs(ih2 - ah2)))
+    for name, img, anchor, bw, bh in canvases[1:]:
+        h2 = head_width(img)
+        if abs(h2 - ih2) > 2:
+            raise SystemExit("对齐失败：idle 与 %s 头部宽度不一致 %d vs %d" % (name, ih2, h2))
+        if anchor != def_anchor:
+            raise SystemExit("对齐失败：idle 与 %s 主体右下角不一致 %s vs %s" % (name, anchor, def_anchor))
+        print("  头部宽度校验：idle %d / %s %d（差 %d px，已断言）" % (ih2, name, h2, abs(ih2 - h2)))
 
-    for img, state in ((canvas_idle, "idle"), (canvas_angry, "angry")):
-        out = os.path.join(out_dir, args.prefix + "-" + state + ".png")
+    for name, img, anchor, bw, bh in canvases:
+        out = os.path.join(out_dir, args.prefix + "-" + name + ".png")
         img.save(out, "PNG", optimize=True)
         bb = content_bbox(img, alpha_only=True)
         margins = (bb[0], bb[1], W - 1 - bb[2], H - 1 - bb[3])
         print("  %s  %dx%d  %.1f KB  内容%s 边距(左,上,右,下)=%s"
               % (out, img.width, img.height, os.path.getsize(out) / 1024.0, bb, margins))
-    print("  ✓ 两态主体同高 %d、同右下角 —— 挂件缩放比一致，切换不跳位" % bh_r)
+    print("  ✓ %d 个状态同画布 %dx%d、主体同右下角 —— 挂件缩放比一致，切换不跳位"
+          % (len(canvases), W, H))
 
 
 if __name__ == "__main__":

@@ -54,6 +54,40 @@
   <div class="radio"><label style="font-weight:400"><input type="radio" name="dsmode" value="topup"> 仅充值余额（不含赠金）</label></div>
   <div id="dsmsg" class="tip" style="margin-top:6px"></div>
 
+  <h2>gpt娘 · 聊天选项与吃醋</h2>
+  <p class="tip">她会挑时候弹出 <b>几个可点的选项</b>：<b>生气/吃醋/伤心</b>时立刻弹；正常状态则
+    <b>你冷落她超过设定的分钟数</b>就弹。你选什么，她怎么回（继续生气 / 吃醋 / 伤心 / 严肃 / 消气）都写在
+    <code>presets/talk.json</code> 里 —— 在 gpt娘 面前夸别的 AI 娘（DeepSeek / Claude / Gemini / Kimi / Grok …），
+    她会吃醋。选项每次都不一样。</p>
+  <div class="row">
+    <input type="checkbox" id="talkon">
+    <span>启用聊天选项（关掉她就只主动说话，不弹选项）</span>
+  </div>
+  <label>多少分钟不理她就弹选项</label>
+  <input type="number" id="talkidle" min="1" max="120" step="1" placeholder="5">
+  <div class="row" style="color:#7a86a8">提示：选项池、台词、吃醋规则都在 <code>presets/talk.json</code>；改完自动热重载。</div>
+
+  <h2>自定义 LLM（可选）</h2>
+  <p class="tip">不填就全部用 <code>presets/talk.json</code> 里的预设选项与预设反应；填了则让<b>你自己的模型</b>
+    按人设现场生成选项与她的话（更适合天天看同一批选项）。接口按 <b>OpenAI 兼容</b>约定调用
+    <code>{baseUrl}/chat/completions</code>。⚠️ <b>你的 API Key 会被发到上面这个 baseUrl</b>，
+    只填你自己信任的地址；Key 只存本机 <code>config.json</code>，导出备份时默认不含。</p>
+  <div class="row">
+    <input type="checkbox" id="llmon">
+    <span>启用自定义 LLM（失败/超时会自动回落预设，不会卡住）</span>
+  </div>
+  <label>接口地址（baseUrl）</label>
+  <input type="password" id="llmbase" placeholder="https://api.example.com/v1">
+  <label>模型名</label>
+  <input type="password" id="llmmodel" placeholder="例如 gpt-4o-mini / deepseek-chat">
+  <label>API Key</label>
+  <input type="password" id="llmkey" placeholder="留空 = 不改（已保存的会被保留）">
+  <div id="llmmsg" class="tip" style="margin-top:6px"></div>
+  <div class="btns" style="margin-top:8px">
+    <button class="ghost" id="testllm">测试连接</button>
+    <button class="ghost" id="clrllmkey">清除已保存的 Key</button>
+  </div>
+
   <h2>启动</h2>
   <div class="row">
     <input type="checkbox" id="autostart">
@@ -64,11 +98,11 @@
   <div id="msg"></div>
 
   <h2>备份 / 迁移</h2>
-  <p class="tip">导出会把本机配置（外观、气泡、角色、开机自启、演示模式）打包成一个 JSON；导入按字段白名单覆盖，
-    未识别的字段会被忽略。默认<b>不含 API Key</b>，需要连 Key 一起带走时勾选下面的选项。</p>
+  <p class="tip">导出会把本机配置（外观、气泡、角色、开机自启、演示模式、聊天选项、LLM 端点）打包成一个 JSON；导入按字段白名单覆盖，
+    未识别的字段会被忽略。默认<b>不含 API Key</b>（DeepSeek 与自定义 LLM 都不含），需要连 Key 一起带走时勾选下面的选项。</p>
   <div class="row">
     <input type="checkbox" id="withkey">
-    <span>导出时包含 DeepSeek API Key（<b>明文</b>，别随手分享）</span>
+    <span>导出时包含 API Key（<b>明文</b>，别随手分享）</span>
   </div>
   <div class="btns">
     <button class="ghost" id="exp">导出配置</button>
@@ -88,6 +122,22 @@ function fill(d) {
   document.getElementById('autostart').checked = d.autostart === true
   var radios = document.getElementsByName('dsmode')
   for (var i = 0; i < radios.length; i++) radios[i].checked = (radios[i].value === (d.dsMode || 'total'))
+  // 聊天选项：idleMin 用"占位符 + 现值"呈现，避免用户没改过也被写进 config
+  var tk = d.talk || {}
+  document.getElementById('talkon').checked = tk.enabled !== false
+  document.getElementById('talkidle').value = Number(tk.idleMin) > 0 ? Number(tk.idleMin) : 5
+  // 自定义 LLM：**不回显明文 Key**（宿主只给 hasKey）
+  var L = d.llm || {}
+  document.getElementById('llmon').checked = L.enabled === true
+  document.getElementById('llmbase').value = L.baseUrl || ''
+  document.getElementById('llmmodel').value = L.model || ''
+  document.getElementById('llmkey').value = ''
+  document.getElementById('llmkey').placeholder = L.hasKey ? '已保存（留空 = 不改）' : 'sk-...'
+  var lm = document.getElementById('llmmsg')
+  lm.style.color = L.ready ? '#2f9e44' : '#7a86a8'
+  lm.textContent = L.ready
+    ? '已就绪：聊天选项与她的话由你的模型生成（失败会自动回落预设）'
+    : (L.hasKey ? '已存 Key，但 baseUrl / 模型名还没填齐' : '未启用，当前全部走 presets/talk.json 的预设')
 }
 function load() {
   fetch('/pet-config.json').then(function (r) { return r.json() }).then(fill).catch(function () {})
@@ -98,6 +148,16 @@ document.getElementById('save').onclick = function () {
   var mode = 'total'
   var radios = document.getElementsByName('dsmode')
   for (var i = 0; i < radios.length; i++) if (radios[i].checked) mode = radios[i].value
+  var idleRaw = document.getElementById('talkidle').value
+  var idle = Number(idleRaw)
+  var llmPayload = {
+    enabled: document.getElementById('llmon').checked,
+    baseUrl: document.getElementById('llmbase').value,
+    model: document.getElementById('llmmodel').value
+  }
+  // 留空 = 不改（宿主把空字符串当"不动 Key"），这样"不回显明文"也能安全保存别的字段
+  var keyVal = document.getElementById('llmkey').value
+  if (String(keyVal).trim()) llmPayload.apiKey = String(keyVal).trim()
   fetch('/config', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -105,13 +165,59 @@ document.getElementById('save').onclick = function () {
       demo: document.getElementById('demo').checked,
       dsKey: document.getElementById('dskey').value,
       dsMode: mode,
-      autostart: document.getElementById('autostart').checked
+      autostart: document.getElementById('autostart').checked,
+      talk: { enabled: document.getElementById('talkon').checked, idleMin: isFinite(idle) && idle > 0 ? idle : 5 },
+      llm: llmPayload
     })
   }).then(function (r) { return r.json() }).then(function (d) {
     if (!d.ok) { say('保存失败', true); return }
     document.getElementById('autostart').checked = d.autostart === true
+    document.getElementById('llmkey').value = ''
+    load()
     say('已保存，挂件将在一分钟内刷新')
   }).catch(function () { say('保存失败', true) })
+}
+
+document.getElementById('testllm').onclick = function () {
+  var el = document.getElementById('llmmsg')
+  el.style.color = '#7a86a8'
+  el.textContent = '正在请求你的 LLM 端点…'
+  fetch('/pet-test-llm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      baseUrl: document.getElementById('llmbase').value,
+      model: document.getElementById('llmmodel').value,
+      apiKey: document.getElementById('llmkey').value
+    }),
+  }).then(function (r) { return r.json() }).then(function (d) {
+    if (d.ok) {
+      el.style.color = '#2f9e44'
+      el.textContent = '连接成功［' + d.model + '］开场：' + (d.opening && d.opening[0] ? d.opening[0].t : '—') +
+        ' ｜ 选项：' + d.options.join(' / ')
+    } else {
+      el.style.color = '#c0392b'
+      el.textContent = '失败 [' + (d.code || '?') + '] ' + (d.error || '')
+    }
+  }).catch(function () {
+    el.style.color = '#c0392b'
+    el.textContent = '请求失败（本地服务没起来？）'
+  })
+}
+
+document.getElementById('clrllmkey').onclick = function () {
+  fetch('/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ llm: { apiKey: null } })
+  }).then(function (r) { return r.json() }).then(function () {
+    document.getElementById('llmkey').value = ''
+    document.getElementById('llmkey').placeholder = 'sk-...'
+    var el = document.getElementById('llmmsg')
+    el.style.color = '#7a86a8'
+    el.textContent = '已清除本机保存的 LLM API Key'
+    load()
+  }).catch(function () {})
 }
 
 document.getElementById('testds').onclick = function () {
