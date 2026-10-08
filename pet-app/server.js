@@ -35,8 +35,8 @@ const CONFIG_KEYS = ['demo', 'dsKey', 'dsMode', 'role', 'autostart', 'widget', '
 //   · ≥50 次  → 3 档，气 5 分钟（封顶）
 //   · 生气期间点角色仍有反应，但只回生气台词（见 presets/bubbles.json 的 gptAngry）
 //   · **情绪按角色独立**（2026-10-07 追加）：每人一格，互不影响；切换角色另有"被甩下"的惩罚
-// 持久化：config.json 的 moods = { [roleId]: { state, until, level, lockUntil, hideUntil, by } }
-//   until/lockUntil/hideUntil 全用**绝对时间戳**而不是剩余秒数 —— 重启/关机再开都能正确续算，
+// 持久化：config.json 的 moods = { [roleId]: { state, until, level, lockUntil, by } }
+//   until/lockUntil 全用**绝对时间戳**而不是剩余秒数 —— 重启/关机再开都能正确续算，
 //   不会因为重启白送一次时长。只在情绪变化时写盘，不是每次点击都写。
 const MOOD_WINDOW_MS = 60 * 1000
 const MOOD_TIERS = [
@@ -70,10 +70,9 @@ function moodTierFor(count) {
 }
 
 // ===== 情绪按角色独立（2026-10-07 用户定稿：gpt娘 生气不该跟着小鲸鱼一起生气）=====
-// config.moods = { [roleId]: { state, until, level, lockUntil, hideUntil, by } }
+// config.moods = { [roleId]: { state, until, level, lockUntil, by } }
 //   · state/until/level：该角色自己的情绪（绝对时间戳，重启续算，与旧版口径一致）
 //   · lockUntil：交互锁 —— 切回她时她还在气头上，在此之前**点她/拖她她都不理**（前端判）
-//   · hideUntil：躲藏 —— 你甩下她之后她最多消失 hideMaxMs（≤3 分钟），此间**切不回她**
 //   · by：'click'(连点) / 'talk'(聊天选项) / 'switch'(被切换甩下) —— 惩罚只对 by==='switch' 的情绪生效
 // 旧版的单条 mood 在第一次读到时迁进当前角色名下（只迁一次，之后不再读写 mood）。
 function readMoods() {
@@ -105,19 +104,18 @@ function moodSlot(roleId) {
 function currentMood() {
   const s = moodSlot(currentRoleId())
   const lockUntil = s ? (Number(s.lockUntil) || 0) : 0
-  const hideUntil = s ? (Number(s.hideUntil) || 0) : 0
   const state = s && MOOD_STATES.indexOf(s.state) >= 0 ? s.state : 'normal'
-  if (state === 'normal') return { state: 'normal', level: 0, until: 0, remainingMs: 0, lockUntil, hideUntil }
+  if (state === 'normal') return { state: 'normal', level: 0, until: 0, remainingMs: 0, lockUntil }
   const until = Number(s.until) || 0
   const remainingMs = until - Date.now()
-  if (remainingMs <= 0) return { state: 'normal', level: 0, until: 0, remainingMs: 0, expired: true, lockUntil, hideUntil }
-  return { state: state, level: Number(s.level) || 1, until, remainingMs, lockUntil, hideUntil }
+  if (remainingMs <= 0) return { state: 'normal', level: 0, until: 0, remainingMs: 0, expired: true, lockUntil }
+  return { state: state, level: Number(s.level) || 1, until, remainingMs, lockUntil }
 }
 
 /**
  * 直接设定**当前角色**的情绪（聊天选项的反应走这里）。
  * holdMs <= 0 或不认识的 state ⇒ 清掉她的情绪；angry 的**档位**仍由 recordMoodClick 维护。
- * 她在跟你对话 = 已经给了台阶 → 交互锁一并取消（躲藏字段是"被甩下"的，切回来时早已不适用，一并清掉）。
+ * 她在跟你对话 = 已经给了台阶 → 交互锁一并取消。
  */
 function setMoodState(state, holdMs, meta) {
   const roleId = currentRoleId()
@@ -130,7 +128,7 @@ function setMoodState(state, holdMs, meta) {
   } else {
     writeMood(roleId, {
       state: st, until: Date.now() + ms, level: Number((meta && meta.level) || 0),
-      by: 'talk', lockUntil: 0, hideUntil: 0,
+      by: 'talk', lockUntil: 0,
     })
     console.log('[dsh-pet] ' + roleId + ' 情绪切换：' + MOOD_LABEL[st] + '，持续 ' + Math.round(ms / 1000) + ' 秒' +
       (meta && meta.reason ? '（' + meta.reason + '）' : ''))
@@ -165,7 +163,7 @@ function recordMoodClick() {
     // 永远停在 1 档（实测踩过）。所以保留缓冲，并在档位升高时换更长的时长。
     if (tier && tier.level > cur.level) {
       const until = now + tier.durationMs
-      writeMood(roleId, { state: 'angry', until, level: tier.level, by: 'click', lockUntil: 0, hideUntil: 0 })
+      writeMood(roleId, { state: 'angry', until, level: tier.level, by: 'click', lockUntil: 0 })
       console.log('[dsh-pet] ' + roleId + ' 情绪升档：1 分钟内点击 ' + buf.length + ' 次 → 生气 ' +
         tier.level + ' 档，持续 ' + Math.round(tier.durationMs / 1000) + ' 秒')
       return currentMood()
@@ -176,7 +174,7 @@ function recordMoodClick() {
   if (!tier) return cur
 
   const until = now + tier.durationMs
-  writeMood(roleId, { state: 'angry', until, level: tier.level, by: 'click', lockUntil: 0, hideUntil: 0 })
+  writeMood(roleId, { state: 'angry', until, level: tier.level, by: 'click', lockUntil: 0 })
   console.log('[dsh-pet] ' + roleId + ' 情绪升级：1 分钟内点击 ' + buf.length + ' 次 → 生气 ' + tier.level +
     ' 档，持续 ' + Math.round(tier.durationMs / 1000) + ' 秒')
   return currentMood()
@@ -184,7 +182,6 @@ function recordMoodClick() {
 
 /**
  * 到期则清掉情绪（**遍历所有角色** —— 每人一格，换着气也要到点消）。
- * 躲藏期（hideUntil）独立计时：情绪过了但还没到 3 分钟的，她照样躲着。
  * 返回是否有角色（特指当前角色）回到 normal，用于决定要不要走写盘/提示。
  */
 function expireMoodIfNeeded() {
@@ -197,8 +194,7 @@ function expireMoodIfNeeded() {
     if (!s || typeof s !== 'object') continue
     const st = MOOD_STATES.indexOf(s.state) >= 0 ? s.state : 'normal'
     if (st !== 'normal' && (Number(s.until) || 0) <= now) {
-      // 只清情绪，保留躲藏（躲藏有自己的倒计时）
-      moods[id] = { state: 'normal', until: 0, level: 0, by: s.by, lockUntil: Number(s.lockUntil) || 0, hideUntil: Number(s.hideUntil) || 0 }
+      moods[id] = { state: 'normal', until: 0, level: 0, by: s.by, lockUntil: Number(s.lockUntil) || 0 }
       dirty = true
       if (id === currentRoleId()) currentChanged = true
       console.log('[dsh-pet] ' + id + ' 情绪到点，回到 normal')
@@ -225,28 +221,19 @@ function switchAwaySpec() {
     // holdMs 下限是 0：0 = 关掉"被甩下"这条惩罚（冒烟测试用它让切换完全无副作用）
     holdMs: clampMs(sa.holdMs, 120000, 0, 30 * 60000),        // 被甩下的情绪时长（默认 2 分钟）
     lockMs: clampMs(sa.lockMs, 60000, 0, 10 * 60000),         // 切回来时的交互锁（0 = 不锁）
-    hideChance: pct(sa.hideChance, 0.4),                      // 直接躲起来的概率
-    hideMinMs: clampMs(sa.hideMinMs, 60000, 1000, 30 * 60000),
-    // 用户定稿：消失**最多 3 分钟**（硬上限在这里夹死，改预设也超不过去）
-    hideMaxMs: clampMs(sa.hideMaxMs, 180000, 1000, 180000),
   }
 }
 
-/** 你切走时，给**被甩下的角色**写入 吃醋/伤心 + 概率躲藏。返回写入的槽（便于测试）。 */
+/** 你切走时，给**被甩下的角色**写入 吃醋/伤心。返回写入的槽（便于测试）。 */
 function applySwitchAway(roleId) {
   const sa = switchAwaySpec()
   if (!sa.enabled || sa.holdMs <= 0) return null   // 情绪时长 0 = 这条惩罚整体关闭，一个字段都不写
   const now = Date.now()
   const state = Math.random() < sa.sadChance ? 'sad' : 'jealous'
-  const slot = { state, until: now + sa.holdMs, level: 0, by: 'switch', lockUntil: 0, hideUntil: 0 }
-  if (Math.random() < sa.hideChance) {
-    const span = Math.max(0, sa.hideMaxMs - sa.hideMinMs)
-    slot.hideUntil = now + sa.hideMinMs + Math.floor(Math.random() * (span + 1))
-  }
+  const slot = { state, until: now + sa.holdMs, level: 0, by: 'switch', lockUntil: 0 }
   writeMood(roleId, slot)
   console.log('[dsh-pet] 切换角色：' + roleId + ' 被甩下 → ' + MOOD_LABEL[state] +
-    ' ' + Math.round(sa.holdMs / 1000) + 's' +
-    (slot.hideUntil ? '，躲藏 ' + Math.round((slot.hideUntil - now) / 1000) + 's' : ''))
+    ' ' + Math.round(sa.holdMs / 1000) + 's')
   return slot
 }
 
@@ -263,13 +250,6 @@ function lockOnReturn(roleId) {
   writeMood(roleId, s)
   console.log('[dsh-pet] ' + roleId + ' 切回来还在气头上 → 交互锁 ' + Math.round(sa.lockMs / 1000) + 's（点她/拖她都不理）')
   return s.lockUntil
-}
-
-/** 该角色还躲着吗（>0 表示还剩多少毫秒）。躲藏中的角色切不回去。 */
-function roleHiddenMs(roleId) {
-  const s = moodSlot(roleId)
-  if (!s) return 0
-  return Math.max(0, (Number(s.hideUntil) || 0) - Date.now())
 }
 
 const MIME = {
@@ -847,6 +827,12 @@ function llmChat(cfg, messages) {
   })
 }
 
+/**
+ * 出戏/元话术黑名单：模型偶尔会把"系统提示/标准模式/选项 A"这类词写进台词，一律作废。
+ * 注意别误伤正常口语：只匹配明确的元话术，不匹配单独出现的 "JSON" 之类技术词在正句里的用法。
+ */
+const TALK_META_RE = /(标准模式|请继续你的工作|系统提示|系统消息|提示词|回复格式|按要求输出|作为一(?:只|个)?助手|我只是一个?语言模型|选项\s*[A-Da-d1-4]\s*[:：]|```|\{\s*"|language model)/i
+
 /** 从模型回复里抠出 JSON 对象（容忍 ```json 围栏与前后废话）。抠不出返回 null。 */
 function llmJson(raw) {
   if (typeof raw !== 'string' || !raw.trim()) return null
@@ -864,7 +850,25 @@ function llmJson(raw) {
   try { return JSON.parse(text.slice(a, b + 1)) } catch (err) { return null }
 }
 
-/** 让 LLM 生成一组选项。形状不合法（数量/长度/重复）就整体作废 → 回落预设。 */
+/**
+ * 选项合法性：选项必须是**主人（用户）能对她说的话**。
+ * 模型常见的两种错法直接作废：
+ *   ① 人称搞反 —— 写成她的台词（带她的人设口吻"作为一只语言模型/我列了"）；
+ *   ② 出戏 —— 冒出系统提示、模式切换、编号选项之类的元话术。
+ */
+function talkBadOption(t) {
+  const s = String(t || '')
+  if (TALK_META_RE.test(s)) return true
+  if (/作为一只语言模型|作为一只?AI|我列了|我把.*记进待办/.test(s)) return true
+  return false
+}
+
+/** 出戏的台词行：一律丢掉（全丢光就回落预设，绝不把元话术显示给用户）。 */
+function talkBadLine(t) {
+  return TALK_META_RE.test(String(t || ''))
+}
+
+/** 让 LLM 生成一组选项。形状或内容（出戏/人称反了）不合法就整体作废 → 回落预设。 */
 async function talkLlmOptions(spec, mood, cfg) {
   const p = (spec.llmPrompt && typeof spec.llmPrompt === 'object') ? spec.llmPrompt : {}
   if (!String(p.open || '').trim()) return null
@@ -888,14 +892,14 @@ async function talkLlmOptions(spec, mood, cfg) {
   for (const v of obj.options) {
     const t = String(v == null ? '' : v).trim()
     if (!t || t.length > maxChars) continue
+    if (talkBadOption(t)) continue
     if (options.some((x) => x.t === t)) continue
     options.push({ id: 'llm' + (options.length + 1), t: t, reaction: '', lines: null })
     if (options.length >= n) break
   }
   if (options.length < n) return null
-  const opening = (typeof obj.opening === 'string' && obj.opening.trim())
-    ? [{ t: obj.opening.trim().slice(0, maxChars * 2), w: 10 }]
-    : null
+  const op = (typeof obj.opening === 'string') ? obj.opening.trim() : ''
+  const opening = (op && !talkBadLine(op)) ? [{ t: op.slice(0, maxChars * 2), w: 10 }] : null
   return { options: options, opening: opening }
 }
 
@@ -925,6 +929,7 @@ async function talkLlmReaction(spec, mood, cfg, text) {
   for (const v of (Array.isArray(obj.lines) ? obj.lines : [])) {
     const t = String(v == null ? '' : v).trim()
     if (!t || t.length > maxChars) continue
+    if (talkBadLine(t)) continue   // 出戏的台词（"已切换到标准模式"之类）一律丢掉
     lines.push({ t: t, w: 10 })
     if (lines.length >= maxLines) break
   }
@@ -1317,8 +1322,7 @@ function handle(req, res) {
   // GET  /dsh-whale/mood.json       读**当前角色**的情绪（前端初始化/消气判断/交互锁）
   // POST /dsh-whale/mood.json       记一次点击 {"click":true}；越阈值则升级并在响应里告知
   // GET  /dsh-whale/mood-image.png  当前情绪对应的角色图（不高兴 → mood/<态>.png，其余 → 角色图）
-  // 响应里的 lockUntil = 交互锁（她背过身去的时段，前端据此对点她/拖她装聋）；
-  // hideUntil 是给**其他**角色的（角色面板用），当前角色永远不隐藏，一并回显无妨。
+  // 响应里的 lockUntil = 交互锁（她背过身去的时段，前端据此对点她/拖她装聋）。
   if (p === '/dsh-whale/mood.json') {
     if (req.method === 'POST') {
       return readBody(req, (body) => {
@@ -1476,8 +1480,7 @@ function handle(req, res) {
   if (p === '/dsh-whale/role-current.json' && (req.method === 'PUT' || req.method === 'POST')) {
     // 前端切换角色时上报（fork 的 whale-widget.js 在 applyRole 里上报）。
     // 这里是「切换惩罚」的唯一落点（2026-10-07 用户定稿）：
-    //   · 没打招呼就切走 → 被甩下的那位吃醋/伤心（+ 概率躲藏 hideMaxMs ≤ 3 分钟）
-    //   · 躲藏中的角色**切不回去** → { ok:false, hidden:true }（前端回退，面板同时置灰）
+    //   · 没打招呼就切走 → 被甩下的那位吃醋/伤心（告别后跳过）
     //   · 切回还气着的她 → 上交互锁（前端对点她/拖她装聋 lockMs）
     // 启动时前端会用**同一个 id** 上报一次（prev === requested），不会误触发。
     return readBody(req, (body) => {
@@ -1487,16 +1490,8 @@ function handle(req, res) {
       const requested = id === 'whale' ? 'whale' : 'default'
       const prev = currentRoleId()
       if (requested !== prev) {
-        const hiddenMs = roleHiddenMs(requested)
-        if (hiddenMs > 0) {
-          // 她躲起来了：不切（角色面板一般已置灰；这里兜手动请求/脚本直改）
-          return send(res, 200, JSON.stringify({
-            ok: false, hidden: true, id: prev, hiddenMs,
-            reason: '她躲起来了，' + Math.ceil(hiddenMs / 1000) + 's 后才会回来',
-          }), MIME['.json'])
-        }
-        // 告别（farewell:true = 走之前打过招呼）→ 跳过切换惩罚：不吃醋/不伤心/不躲藏
-        if (!farewell) applySwitchAway(prev)   // 被甩下的那位 → 吃醋/伤心（+ 概率躲藏）
+        // 告别（farewell:true = 走之前打过招呼）→ 跳过切换惩罚：不吃醋/不伤心
+        if (!farewell) applySwitchAway(prev)   // 被甩下的那位 → 吃醋/伤心
         writeConfig({ role: requested })
         dsCache = { at: 0, data: null }
         const lockUntil = lockOnReturn(requested)  // 切回来的这位：还在气头上就锁交互
@@ -1509,8 +1504,7 @@ function handle(req, res) {
   }
   if (p === '/dsh-whale/roles.json') {
     // 角色清单 = presets/roles.json（角色名/图片/顺序都改那一份即可）。
-    // 附带**每人自己的情绪**：面板据此把躲藏中的角色置灰（hideUntil 是绝对时间戳，
-    // 面板自己每秒重算剩余，不用轮询接口）。
+    // 附带**每人自己的情绪**（面板上显示吃醋/伤心/生气小标签）。
     return send(res, 200, JSON.stringify({
       ok: true,
       roles: presetRoles().map((r) => {
@@ -1526,7 +1520,6 @@ function handle(req, res) {
           createdAt: Number(r.createdAt) || 0,
           format: 'png',
           moodState: st,
-          hideUntil: Math.max(0, (s && Number(s.hideUntil)) || 0),
         }
       }),
     }), MIME['.json'])
@@ -1637,7 +1630,7 @@ module.exports = {
   reloadPresets,
   clearPresetCache,
   // 情绪系统：供 tools/smoke-pet.mjs 等测试读取/重置。
-  // resetMoodState() 清掉**所有角色**的情绪槽（含交互锁/躲藏）与各角色的点击缓冲，
+  // resetMoodState() 清掉**所有角色**的情绪槽（含交互锁）与各角色的点击缓冲，
   // 外加聊天选项的内存态；不碰其它设置。
   currentMood,
   moodSlot,          // 原始槽（按角色）：测试用来看**别的角色**此刻的情绪
@@ -1655,6 +1648,8 @@ module.exports = {
   // 聊天选项 + 吃醋：供测试直接读取规格/切情绪（HTTP 路由见 /dsh-whale/talk.json）
   setMoodState,
   talkSpec,
+  talkBadOption,    // LLM 选项判废（人称反了/出戏）—— 供冒烟直接验证
+  talkBadLine,      // LLM 台词判废（出戏元话术）
   switchAwaySpec,   // 切换惩罚的有效参数（presets/talk.json 的 switchAway 经钳制后的值）
 }
 

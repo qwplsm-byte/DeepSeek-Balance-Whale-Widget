@@ -58,7 +58,6 @@ function patchSwitchAway(sa) {
   const t = JSON.parse(fs.readFileSync(TALK_FILE, 'utf8'))
   t.talk.switchAway = Object.assign({
     enabled: true, sadChance: 1, holdMs: 0, lockMs: 0,
-    hideChance: 0, hideMinMs: 1000, hideMaxMs: 1000,
   }, sa || {})
   fs.writeFileSync(TALK_FILE, JSON.stringify(t, null, 2))
 }
@@ -289,7 +288,7 @@ try {
   await step('情绪：到点自动消气并写回 config', async () => {
     // 直接把当前角色的槽改成"已过期"，模拟时间流逝（绝对时间戳口径，重启也这么算）
     const moods = Object.assign({}, pet.readConfig().moods)
-    moods.default = { state: 'angry', until: Date.now() - 1000, level: 2, by: 'click', lockUntil: 0, hideUntil: 0 }
+    moods.default = { state: 'angry', until: Date.now() - 1000, level: 2, by: 'click', lockUntil: 0 }
     pet.writeConfig({ moods })
     const m = await getJson('/dsh-whale/mood.json')
     assert(m.body.state === 'normal', 'state=' + m.body.state)
@@ -573,7 +572,10 @@ try {
         try { req = JSON.parse(body) } catch (err) {}
         const userText = String(((req.messages || [])[1] || {}).content || '')
         let content
-        if (llmMode !== 'good') content = '这不是 JSON，我随便说点别的'
+        if (llmMode === 'meta') {
+          // 全是不合格的选项（出戏 + 她的口吻反串）→ 必须整体作废、回落预设
+          content = JSON.stringify({ opening: '已切换到标准模式', options: ['请继续你的工作', '作为一只语言模型，我列了三个选项', '选项A：我道歉'] })
+        } else if (llmMode !== 'good') content = '这不是 JSON，我随便说点别的'
         else if (userText.indexOf('options') >= 0) {
           // 注意每条都在 maxOptionChars（10）以内：超长会被宿主判为不合法而整体回落预设
           content = JSON.stringify({ opening: '冒烟假端点', options: ['假选项甲', '假选项乙', '夸夸DeepSeek'] })
@@ -618,6 +620,19 @@ try {
     } finally { llmMode = 'good' }
   })
 
+  await step('自定义 LLM：返回的选项全是出戏/反串 → 整体作废回落预设', async () => {
+    llmMode = 'meta'
+    try {
+      pet.setMoodState('normal', 0)
+      const r = await talkOpen()
+      assert(r.body.source === 'preset', '不合格选项应整体作废回落 preset，实际 ' + r.body.source)
+      for (const o of r.body.options) {
+        assert(!/标准模式|请继续你的工作|选项A|作为一只语言模型/.test(o.t), '预设里混进了出戏选项：' + o.t)
+      }
+      return 'source=preset（出戏选项全判废 ✓）'
+    } finally { llmMode = 'good' }
+  })
+
   await step('设置页「测试连接」：LLM 未配齐给可读错误；配好给样例', async () => {
     const okr = await post('/pet-test-llm', { baseUrl: '', model: '', apiKey: '' })
     assert(okr.body.ok === true, '已有保存的配置时应能测通')
@@ -645,9 +660,9 @@ try {
   // ==========================================================================
   // 按角色独立的情绪 + 切换惩罚（2026-10-07 用户定稿）
   //   · 每人一格：gpt娘 生气不跟着小鲸鱼一起气
-  //   · 没打招呼切走 → 被甩下的那位吃醋/伤心（+ 概率躲藏）
+  //   · 没打招呼切走 → 被甩下的那位吃醋/伤心
   //   · 切回来还气着 → 交互锁（点她/拖她她都不理）；情绪过点回来 → 正常对待
-  //   · 躲藏中的角色切不回去（hidden 拒绝），到点自动恢复
+  //   · 情绪持续期内随时都能切回去（躲藏机制已删除）
   // ==========================================================================
   await step('情绪按角色独立：whale 生气不传染给 gpt娘', async () => {
     await post('/dsh-whale/role-current.json', { id: 'default' })
@@ -703,40 +718,34 @@ try {
     return '未上锁 ✓'
   })
 
-  await step('切换惩罚：躲藏中的角色切不回去（hidden 拒绝 → 到点恢复）', async () => {
+  await step('切换惩罚：情绪持续期内随时都能切回去（躲藏机制已删除）', async () => {
     await post('/dsh-whale/role-current.json', { id: 'default' })
     pet.resetMoodState()
-    patchSwitchAway({ holdMs: 60000, lockMs: 0, hideChance: 1, hideMinMs: 3000, hideMaxMs: 3000, sadChance: 1 })
+    patchSwitchAway({ holdMs: 60000, lockMs: 0, sadChance: 1 })
     await getJson('/dsh-whale/reload')
-    await post('/dsh-whale/role-current.json', { id: 'whale' })   // 甩下 default，且必躲 3s
+    await post('/dsh-whale/role-current.json', { id: 'whale' })   // 甩下 default（伤心 60s）
     const roles = (await getJson('/dsh-whale/roles.json')).body.roles
     const d = roles.find((x) => x.id === 'default')
-    assert(d && d.hideUntil > Date.now(), 'roles.json 没带躲藏标记：' + JSON.stringify(d))
-    assert(d.moodState === 'sad', 'roles.json 没带情绪：' + JSON.stringify(d))
-    const refused = await post('/dsh-whale/role-current.json', { id: 'default' })
-    assert(refused.body.ok === false && refused.body.hidden === true, '躲着居然切回去了：' + JSON.stringify(refused.body))
-    assert(pet.readConfig().role === 'whale', '拒绝切换后 role 被改了：' + pet.readConfig().role)
-    await new Promise((r) => setTimeout(r, 3300))
+    assert(d && d.moodState === 'sad', 'roles.json 没带情绪：' + JSON.stringify(d))
+    assert(d.hideUntil === undefined, 'roles.json 仍在下发躲藏字段：' + JSON.stringify(d))
     const back = await post('/dsh-whale/role-current.json', { id: 'default' })
-    assert(back.body.ok === true, '倒计时结束还切不回：' + JSON.stringify(back.body))
+    assert(back.body.ok === true, '她还在情绪里却切不回去（躲藏没删干净）：' + JSON.stringify(back.body))
+    assert(pet.readConfig().role === 'default', '切回后 role 不对：' + pet.readConfig().role)
     pet.resetMoodState()
     patchSwitchAway({})
     await getJson('/dsh-whale/reload')
-    return '躲 3s → 拒绝 → 到点恢复 ✓'
+    return '情绪期内可自由切换 ✓'
   })
 
-  await step('告别：farewell:true 的切换不写吃醋/伤心/躲藏，未告别照常惩罚', async () => {
+  await step('告别：farewell:true 的切换不写吃醋/伤心，未告别照常惩罚', async () => {
     await post('/dsh-whale/role-current.json', { id: 'default' })
     pet.resetMoodState()
-    patchSwitchAway({ holdMs: 60000, lockMs: 0, sadChance: 1, hideChance: 1, hideMinMs: 2000, hideMaxMs: 2000 })
+    patchSwitchAway({ holdMs: 60000, lockMs: 0, sadChance: 1 })
     await getJson('/dsh-whale/reload')
     const bye = await post('/dsh-whale/role-current.json', { id: 'whale', farewell: true })
     assert(bye.body.ok === true, '告别切换失败：' + JSON.stringify(bye.body))
     const dSlot = pet.moodSlot('default')
     assert(!dSlot || dSlot.state !== 'sad', '告别后仍给被甩下的写情绪：' + JSON.stringify(dSlot))
-    const roles = (await getJson('/dsh-whale/roles.json')).body.roles
-    const d = roles.find((x) => x.id === 'default')
-    assert(!(d && d.hideUntil > Date.now()), '告别后还是躲藏了：' + JSON.stringify(d))
     // 对照组：没告别切走 → 惩罚照常（sadChance 1 必中）
     await post('/dsh-whale/role-current.json', { id: 'default' })
     pet.resetMoodState()
@@ -747,6 +756,20 @@ try {
     patchSwitchAway({})
     await getJson('/dsh-whale/reload')
     return 'farewell 跳过 / 未告别照常 ✓'
+  })
+
+  await step('LLM 质量兜底：出戏/人称反了的选项与台词一律作废', async () => {
+    const badOpt = ['已切换到标准模式', '作为一只语言模型，我列了三个选项', '选项A：道歉', '请继续你的工作', '系统提示：请输出JSON']
+    for (const s of badOpt) {
+      assert(pet.talkBadOption(s) === true, '坏选项没被判废：' + s)
+    }
+    const goodOpt = ['我错了，不该一直点你', '我给你带了新的额度', 'DeepSeek懂我']
+    for (const s of goodOpt) {
+      assert(pet.talkBadOption(s) === false, '好选项被误判：' + s)
+    }
+    assert(pet.talkBadLine('已切换到标准模式。请继续你的工作。') === true, '出戏台词没被判废')
+    assert(pet.talkBadLine('……嗯。') === false, '正常台词被误判')
+    return '出戏 ' + badOpt.length + ' 条判废 / 正常 ' + goodOpt.length + ' 条放过 ✓'
   })
 
 } catch (err) {

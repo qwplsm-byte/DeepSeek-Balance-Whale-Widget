@@ -324,22 +324,34 @@ check('聊天选项 / 吃醋机制（presets/talk.json + 三处接线）', () =>
         ' 字，含占位符）—— 泡泡里会折成两行挤掉选项：' + l.t)
     }
   }
+  // 出戏的元话术不许出现在预设台词里（"已切换到标准模式"这类，实测破坏体验）
+  const metaRe = /标准模式|请继续你的工作|系统提示|系统消息/
+  for (const o of opts) {
+    assert(!metaRe.test(String(o.t)), '选项出戏（元话术）：' + o.t)
+    for (const l of (Array.isArray(o.lines) ? o.lines : [])) {
+      assert(!metaRe.test(String(l.t)), '选项台词出戏（元话术）：' + l.t)
+    }
+  }
+  for (const st of Object.keys(t.reactions || {})) {
+    const rr = t.reactions[st] || {}
+    for (const l of (Array.isArray(rr.lines) ? rr.lines : [])) {
+      assert(!metaRe.test(String(l.t)), 'reactions.' + st + ' 台词出戏（元话术）：' + l.t)
+    }
+  }
   assert(t.llmPrompt && t.llmPrompt.system && t.llmPrompt.open && t.llmPrompt.react,
     'llmPrompt 需要 system / open / react（人设文案不写在代码里）')
 
-  // —— 切换惩罚（2026-10-07 追加：没打招呼就切走 → 被甩下的那位吃醋/伤心，
-  //    切回来锁交互 / 或直接躲起来让你切不回）——
+  // —— 切换惩罚（2026-10-07 追加：没打招呼就切走 → 被甩下的那位吃醋/伤心，切回来锁交互）——
+  // 躲藏（角色消失）机制已按用户要求**删除**：不再有 hideChance/hideMinMs/hideMaxMs。
   const sa = t.switchAway
   assert(sa && typeof sa === 'object', 'talk.switchAway 缺失（切换惩罚没配置）')
   assert(typeof sa.enabled === 'boolean', 'switchAway.enabled 必须是布尔值')
   assert(Number(sa.holdMs) >= 1000, 'switchAway.holdMs 至少 1000（被甩下的情绪要有存在感）')
   assert(Number(sa.lockMs) >= 0 && Number(sa.lockMs) <= 10 * 60000, 'switchAway.lockMs 必须在 0~10 分钟')
-  assert(Number(sa.hideMaxMs) >= 1000 && Number(sa.hideMaxMs) <= 180000,
-    'switchAway.hideMaxMs 必须 ≤180000 —— 用户定的硬上限是「消失最多 3 分钟」')
-  assert(Number(sa.hideMinMs) >= 1000 && Number(sa.hideMinMs) <= Number(sa.hideMaxMs),
-    'switchAway.hideMinMs 必须 ≥1s 且 ≤ hideMaxMs')
   assert(Number(sa.sadChance) >= 0 && Number(sa.sadChance) <= 1, 'switchAway.sadChance 必须在 0~1（伤心概率）')
-  assert(Number(sa.hideChance) >= 0 && Number(sa.hideChance) <= 1, 'switchAway.hideChance 必须在 0~1')
+  for (const gone of ['hideChance', 'hideMinMs', 'hideMaxMs']) {
+    assert(sa[gone] === undefined, '躲藏机制已删除，switchAway 里不该再有 ' + gone)
+  }
 
   // —— 三处接线 ——
   const front = fs.readFileSync(FRONT_FILE, 'utf8')
@@ -350,10 +362,14 @@ check('聊天选项 / 吃醋机制（presets/talk.json + 三处接线）', () =>
   assert(front.includes('talkCfg = d.talk'), 'refreshBubbleCfgFromHost/loadBubbleCfg 未接收顶层 talk 配置')
   assert(front.includes('talkBaselineAt = Date.now()'), '点她未重置聊天选项的 idle 基准')
   assert(front.includes('talkChooseIgnored'), '点泡泡本体未按"被无视"处理')
-  // 按角色情绪 + 切换惩罚的前端三件套：交互锁、面板躲藏置灰、切完立刻对表
-  for (const need of ['function moodLocked', 'moodLockUntil', 'dshwv-roleitem-hidden',
-    'refreshRoleListQuiet', 'roleListHasHidden', 'hidden && typeof d.id']) {
+  // 按角色情绪 + 切换惩罚的前端三件套：交互锁、面板情绪标签、切完立刻对表
+  for (const need of ['function moodLocked', 'moodLockUntil', 'dshwv-rolemood',
+    'refreshRoleListQuiet', 'roleListHasMood', 'farewell: farewell']) {
     assert(front.includes(need), '前端缺少切换惩罚接线：' + need)
+  }
+  // 躲藏机制已删除（用户要求）：前端不许再出现置灰/倒计时
+  for (const gone of ['dshwv-roleitem-hidden', 'dshwv-rolehide', 'roleListHasHidden', 'hideUntil']) {
+    assert(!front.includes(gone), '躲藏机制已删除，前端不该再有 ' + gone)
   }
   const server = fs.readFileSync(path.join(ROOT, 'pet-app', 'server.js'), 'utf8')
   for (const need of ["p === '/dsh-whale/talk.json'", 'function talkSpec', 'function talkOpenPayload',
@@ -364,11 +380,18 @@ check('聊天选项 / 吃醋机制（presets/talk.json + 三处接线）', () =>
   assert(server.includes('MOOD_STATES') && server.includes("jealous: 'angry'"),
     '服务端缺少多情绪状态或素材回落链（吃醋/伤心没有素材时要回落到生气素材）')
   assert(server.includes("p === '/pet-test-llm'"), '服务端缺少 /pet-test-llm（设置页的「测试连接」）')
-  // 按角色独立的情绪 + 切换惩罚的服务端半区
+  // 按角色独立的情绪 + 切换惩罚的服务端半区（躲藏已删除）
   for (const need of ['function readMoods', 'function writeMood', 'function moodSlot',
-    'function applySwitchAway', 'function lockOnReturn', 'function roleHiddenMs',
-    "by: 'switch'", 'hideUntil', 'lockUntil', 'hidden: true']) {
+    'function applySwitchAway', 'function lockOnReturn',
+    "by: 'switch'", 'lockUntil']) {
     assert(server.includes(need), 'pet-app/server.js 缺少按角色情绪/切换惩罚接线：' + need)
+  }
+  for (const gone of ['roleHiddenMs', 'hideUntil', 'hidden: true', 'hideChance']) {
+    assert(!server.includes(gone), '躲藏机制已删除，server.js 不该再有 ' + gone)
+  }
+  // LLM 选项/台词的质量兜底：人称反了、出戏的元话术一律作废
+  for (const need of ['TALK_META_RE', 'function talkBadOption', 'function talkBadLine']) {
+    assert(server.includes(need), 'server.js 缺少 LLM 出戏/人称校验：' + need)
   }
   assert(server.includes("'moods'"), 'CONFIG_KEYS 里没有 moods（按角色情绪落不了盘/进不了备份）')
   // 告别功能（点过再切换 → 不吃醋/不伤心）

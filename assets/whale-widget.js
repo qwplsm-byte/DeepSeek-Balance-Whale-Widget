@@ -475,10 +475,6 @@ var css = [
   '.dshwv-roleitem{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:6px;cursor:pointer;color:#203170;font-size:12px;white-space:nowrap;min-width:0}',
   '.dshwv-roleitem:hover{background:rgba(32,49,112,.1)}',
   '.dshwv-roleitem.dshwv-roleitem-cur{background:rgba(32,49,112,.14)}',
-  // 切换惩罚：躲藏中的角色置灰 + 点不动（倒计时标签实时走字）
-  '.dshwv-roleitem.dshwv-roleitem-hidden{opacity:.5;cursor:not-allowed}',
-  '.dshwv-roleitem.dshwv-roleitem-hidden:hover{background:transparent}',
-  '.dshwv-rolehide{flex:0 0 auto;font-size:10px;line-height:1;padding:2px 4px;border-radius:3px;background:#c0392b;color:#fff}',
   // 情绪小标签（吃醋/伤心/生气）：纯展示
   '.dshwv-rolemood{flex:0 0 auto;font-size:10px;line-height:1;padding:2px 4px;border-radius:3px;background:rgba(32,49,112,.12);color:#203170}',
   '.dshwv-rolethumb{width:22px;height:22px;border-radius:4px;object-fit:cover;flex:0 0 auto;background:#e8ecf7}',
@@ -1733,7 +1729,7 @@ roleFileInput.addEventListener('change', function () { onRoleFileChosen(roleFile
 menuBox.appendChild(rowRole)
 // —— 告别（2026-10-07 用户定稿）：点一下「告别」，再切换角色就不会让被甩下的那位吃醋/伤心
 //    标记记在 localStorage（dshw-role-bye = 告别时所在角色 id），随下一次**离开她**的切换消耗掉；
-//    宿主在 role-current 里看到 farewell:true 就跳过 applySwitchAway（不写情绪/躲藏/锁）。
+//    宿主在 role-current 里看到 farewell:true 就跳过 applySwitchAway（不写情绪/锁）。
 var rowBye = menuRow()
 rowBye.appendChild(menuLabel('告别'))
 var byeBtn = document.createElement('button')
@@ -15700,14 +15696,14 @@ function applyRole(id, name, url) {
   // ⚠️ 必须等 PUT 落地后再拉泡泡/余额：三个请求并发时 GET 可能先到、宿主还按旧角色应答，
   // 表现就是「切完角色首击还是旧口径」（实测踩过）。
   // ⚠️ 情绪**按角色各记各的**，切完必须立刻对一次表（否则要等 20s 轮询才换图/才知道被锁）；
-  //    PUT 的响应里还带着宿主的裁定：ok:false,hidden = 那位躲起来了没切成，要回退。
+  //    PUT 的响应里还带着宿主裁定的交互锁 lockUntil。
   try {
     fetch('/dsh-whale/role-current.json', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id, farewell: farewell }) })
       .then(function (r) { return r.json() })
       .catch(function () { return null })
       .then(function (d) {
-        // 切换被拒（她躲起来了）：本地已按新角色画了图 —— 回退到宿主真正记录的角色
-        if (d && d.ok === false && d.hidden && typeof d.id === 'string' && d.id) {
+        // 切换失败（网络异常）：本地已按新角色画了图 —— 拉回宿主真正记录的角色
+        if (d && d.ok === false && typeof d.id === 'string' && d.id) {
           try { localStorage.setItem('dshw-role', d.id) } catch (err) {}
           if (farewell) { try { localStorage.setItem('dshw-role-bye', '1') } catch (err) {} }  // 没切成 → 告别还回去
           try { loadRoles() } catch (err) {}   // 找回宿主当前角色并重新 applyRole
@@ -15732,7 +15728,7 @@ function roleUrl(id) {
   if (id === 'default') return IMG_URL
   return '/dsh-whale/role-image.png?id=' + encodeURIComponent(id)
 }
-var rolePanelTimer = null // 面板开着时每秒重绘：躲藏倒计时要走字
+var rolePanelTimer = null // 面板开着时每秒重绘（情绪标签可能到点消气）
 function toggleRolePanel() {
   if (rolePanel.classList.contains('dshwv-rolelist-open')) { closeRolePanel(); return }
   try {
@@ -15746,23 +15742,20 @@ function toggleRolePanel() {
     rolePanel.style.top = (b.bottom + 6) + 'px'
     rolePanel.style.display = 'block'
     rolePanel.classList.add('dshwv-rolelist-open')
-    // 打开面板时先刷一次角色清单（躲藏状态可能刚过期/刚开始，缓存里的 hideUntil 不新鲜）
+    // 打开面板时先刷一次角色清单（情绪可能刚变/刚消，缓存里的 moodState 不新鲜）
     try { refreshRoleListQuiet() } catch (err) {}
-    // 面板开着期间每秒重绘：躲藏中的角色倒计时（…s 后回来）要实时走字；
-    // 条件 = 此刻有人躲着，或**上一帧画过躲藏标签**（过期后要靠这最后一帧把置灰摘掉，
-    // 否则「躲起来 1s」会卡在面板上）。没人躲时**不重绘**（每秒 innerHTML 重建会打断名称跑马灯）。
+    // 面板开着期间每秒重绘：情绪标签会到点消气，得把标签摘掉。
     if (!rolePanelTimer) {
       rolePanelTimer = setInterval(function () {
-        try { if (rolePanelHasHidden || roleListHasHidden()) renderRolePanel() } catch (err) {}
+        try { if (rolePanelHasMood || roleListHasMood()) renderRolePanel() } catch (err) {}
       }, 1000)
     }
   } catch (err) {}
 }
-var rolePanelHasHidden = false // 上一帧面板上画过躲藏条吗（倒计时归零后的收尾重绘用）
-function roleListHasHidden() {
-  var now = Date.now()
+var rolePanelHasMood = false // 上一帧面板上画过情绪标签吗（到点消气后的收尾重绘用）
+function roleListHasMood() {
   for (var i = 0; i < roleList.length; i++) {
-    if (Number(roleList[i].hideUntil) > now && roleList[i].id !== currentRole.id) return true
+    if (roleList[i].moodState && roleList[i].moodState !== 'normal') return true
   }
   return false
 }
@@ -15783,15 +15776,10 @@ function closeRolePanel() {
 function renderRolePanel() {
   try {
     rolePanel.innerHTML = ''
-    rolePanelHasHidden = false
+    rolePanelHasMood = false
     roleList.forEach(function (r) {
-      // 切换惩罚：她躲起来了 → 置灰 + 倒计时 + 点不动（hideUntil 是宿主下发的绝对时刻）
-      var hideMs = (Number(r.hideUntil) || 0) - Date.now()
-      var hidden = hideMs > 0 && r.id !== currentRole.id
-      if (hidden) rolePanelHasHidden = true
       var item = document.createElement('div')
-      item.className = 'dshwv-roleitem' + (currentRole.id === r.id ? ' dshwv-roleitem-cur' : '') +
-        (hidden ? ' dshwv-roleitem-hidden' : '')
+      item.className = 'dshwv-roleitem' + (currentRole.id === r.id ? ' dshwv-roleitem-cur' : '')
       var thumb = document.createElement('img')
       thumb.className = 'dshwv-rolethumb'
       thumb.src = r.url
@@ -15809,14 +15797,9 @@ function renderRolePanel() {
         nameWrap.appendChild(gifTag)
       }
       nameWrap.appendChild(name)
-      if (hidden) {
-        var hideTag = document.createElement('span')
-        hideTag.className = 'dshwv-rolehide'
-        hideTag.textContent = '躲起来 ' + Math.ceil(hideMs / 1000) + 's'
-        hideTag.title = '她还在生你的气，倒计时结束才会回来'
-        nameWrap.appendChild(hideTag)
-      } else if (r.moodState && r.moodState !== 'normal') {
+      if (r.moodState && r.moodState !== 'normal') {
         // 情绪小标签（她此刻什么脸色）：仅展示，不影响点按
+        rolePanelHasMood = true
         var moodTag = document.createElement('span')
         moodTag.className = 'dshwv-rolemood'
         moodTag.textContent = r.moodState === 'jealous' ? '吃醋' : (r.moodState === 'sad' ? '伤心' : '生气')
@@ -15847,8 +15830,6 @@ function renderRolePanel() {
         item.appendChild(del)
       }
       item.addEventListener('click', function () {
-        // 躲藏中的角色点不动（双保险：宿主 role-current 也会拒绝；本地就别切过去再弹回来）
-        if (hidden) return
         applyRole(r.id, r.name, roleUrl(r.id))
       })
       bindNameMarquee(item, name)
