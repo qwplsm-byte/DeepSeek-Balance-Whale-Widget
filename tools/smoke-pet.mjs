@@ -772,6 +772,14 @@ try {
     return '出戏 ' + badOpt.length + ' 条判废 / 正常 ' + goodOpt.length + ' 条放过 ✓'
   })
 
+  await step('Codex 重置窗口归类：按 window_minutes 分 5h / 周 / 月（实测 primary=30天）', async () => {
+    assert(pet.codexWinKey(300, 'rolling') === 'rolling', '5h 档没归类成 rolling')
+    assert(pet.codexWinKey(10080, 'weekly') === 'weekly', '7 天没归类成 weekly')
+    assert(pet.codexWinKey(43200, 'rolling') === 'monthly', '30 天没归类成 monthly（实测 primary 就是这一档）')
+    assert(pet.codexWinKey(null, 'weekly') === 'weekly', '无 window_minutes 时未退回位置约定')
+    return '300→5h / 10080→周 / 43200→月 ✓'
+  })
+
 } catch (err) {
   failed++
   results.push('  ✗ 启动失败：' + ((err && err.message) || err))

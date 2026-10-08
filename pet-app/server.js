@@ -441,6 +441,20 @@ function winLabel(minutes) {
   if (m >= 60) return Math.round(m / 60) + 'h'
   return m + '分钟'
 }
+/**
+ * Codex 的窗口按 window_minutes 归类成固定 key（5h / 周 / 月）——
+ * 不能再假设 "primary=5h, secondary=周"：实测 primary 就是 30 天（43200 分钟）那一档。
+ * 归类不出来（日志没带 window_minutes）时退回位置约定（primary→rolling，secondary→weekly）。
+ */
+function codexWinKey(minutes, fallbackKey) {
+  const m = Number(minutes) || 0
+  if (m <= 0) return fallbackKey
+  if (m <= 360) return 'rolling'   // ≤6h → 5 小时档
+  if (m <= 20160) return 'weekly'  // ≤14天 → 周档
+  return 'monthly'                 // 其余（30 天）→ 月档
+}
+const CODEX_WIN_LABEL = { rolling: '5h', weekly: '周', monthly: '月' }
+const CODEX_WIN_ORDER = { rolling: 0, weekly: 1, monthly: 2 }
 async function codexPlan() {
   const now = Date.now()
   if (codexPlanCache.windows && now - codexPlanCache.at < 30000) return codexPlanCache
@@ -470,12 +484,26 @@ async function codexPlan() {
         if (entry.rl && entry.rlTs >= bestTs) { bestRl = entry.rl; bestTs = entry.rlTs; break }
       }
       const windows = []
-      if (bestRl) {
-        const prim = normalizeCodexWindow(bestRl.primary)
-        const sec = normalizeCodexWindow(bestRl.secondary)
-        if (prim) windows.push({ key: 'rolling', label: prim.windowMinutes ? winLabel(prim.windowMinutes) : '5h', usedPct: prim.usedPct, resetAt: prim.resetAt })
-        if (sec) windows.push({ key: 'weekly', label: '周', usedPct: sec.usedPct, resetAt: sec.resetAt })
+      const seenWin = {}
+      const pushWin = (w, fallbackKey) => {
+        if (!w) return
+        const key = codexWinKey(w.windowMinutes, fallbackKey)
+        if (!key || seenWin[key]) return
+        seenWin[key] = true
+        windows.push({
+          key: key,
+          label: CODEX_WIN_LABEL[key] || winLabel(w.windowMinutes),
+          usedPct: w.usedPct,
+          resetAt: w.resetAt,
+        })
       }
+      if (bestRl) {
+        pushWin(normalizeCodexWindow(bestRl.primary), 'rolling')
+        pushWin(normalizeCodexWindow(bestRl.secondary), 'weekly')
+        if (Array.isArray(bestRl.limits)) for (const lw of bestRl.limits) pushWin(normalizeCodexWindow(lw), '')
+      }
+      windows.sort((a, b) => (CODEX_WIN_ORDER[a.key] === undefined ? 9 : CODEX_WIN_ORDER[a.key]) -
+        (CODEX_WIN_ORDER[b.key] === undefined ? 9 : CODEX_WIN_ORDER[b.key]))
       codexPlanCache = { at: now, windows: windows.length ? windows : null, planType: bestRl && bestRl.plan_type ? String(bestRl.plan_type) : '', sessions: stats.length }
     })().finally(() => { codexPlanCache._p = null })
   }
@@ -1651,6 +1679,7 @@ module.exports = {
   talkBadOption,    // LLM 选项判废（人称反了/出戏）—— 供冒烟直接验证
   talkBadLine,      // LLM 台词判废（出戏元话术）
   switchAwaySpec,   // 切换惩罚的有效参数（presets/talk.json 的 switchAway 经钳制后的值）
+  codexWinKey,      // Codex 窗口归类（5h / 周 / 月）—— 纯函数，供冒烟验证
 }
 
 if (require.main === module) {

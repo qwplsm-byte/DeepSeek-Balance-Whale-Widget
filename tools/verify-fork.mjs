@@ -399,6 +399,14 @@ check('聊天选项 / 吃醋机制（presets/talk.json + 三处接线）', () =>
   for (const need of ['dshw-role-bye', 'farewell: farewell', "menuLabel('告别')", 'syncByeBtn']) {
     assert(front.includes(need), '前端缺少告别接线：' + need)
   }
+  // Codex 重置窗口（月 / 周 / 5h，可选勾选；抓到才有）
+  for (const need of ['function codexWinKey', 'CODEX_WIN_LABEL', 'CODEX_WIN_ORDER', 'pushWin']) {
+    assert(server.includes(need), 'server.js 缺少 Codex 窗口归类：' + need)
+  }
+  for (const need of ['function apiCodexPlanWinList', 'function bubblePlanWinsOf', 'planWins', '显示窗口',
+    'function apiCodexPlanPctText', 'function apiCodexPlanResetText', 'CODEX_PLAN_WIN_NAMES']) {
+    assert(front.includes(need), '前端缺少 Codex 多档重置窗口接线：' + need)
+  }
   const host = fs.readFileSync(path.join(ROOT, 'lib', 'index.js'), 'utf8')
   assert(host.includes("path: '/dsh-whale/talk.json'"), 'lib/index.js 未登记 /dsh-whale/talk.json（前端会静默 404 + ci-audit 对等检查判红）')
   assert(host.includes('enabled: false'), 'lib/index.js 的 talk.json 占位应答应明确 enabled:false')

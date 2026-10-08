@@ -8878,8 +8878,48 @@ function openQuickModuleEditor(m, anchorBtn) {
   tplRow()
   // v769：对话名模块的「保留长度」（与整窗编辑器共用同一份实现；这里改了会实时刷新预览）
   if (m.type === 'session') box.appendChild(sessionLenRowBuild(qRow, qLabel, m, changed))
-  // 订阅额度模块的「显示样式」= 选时间窗口（多窗口厂商，如 OpenCode Go 的 5h / 周 / 月）
-  if (m.type === 'plan' && (apiPlanMultiWin(m.modelId) || apiPlanWinList(m.modelId))) {
+  // Codex（本地日志）：窗口档位是勾选出来的 —— 默认只勾「月」，周 / 5h 要手动勾；
+  // 日志里没抓到的档不出现（用户要求：可选、手动开启、抓到才有）。
+  if (m.type === 'plan' && apiCodexPlanWinList(m.modelId)) {
+    var cwrow = qRow()
+    cwrow.appendChild(qLabel('显示窗口'))
+    var cwbox = document.createElement('div')
+    cwbox.style.cssText = 'flex:1;min-width:0;display:flex;align-items:center;gap:8px;flex-wrap:wrap'
+    var clist = apiCodexPlanWinList(m.modelId)
+    var cpick = bubblePlanWinsOf(m)
+    for (var ci = 0; ci < clist.length; ci++) {
+      (function (w) {
+        var lab = document.createElement('label')
+        lab.style.cssText = 'display:inline-flex;align-items:center;gap:3px;font-size:12px;cursor:pointer'
+        var cb = document.createElement('input')
+        cb.type = 'checkbox'
+        cb.className = 'dshwv-check'
+        cb.checked = cpick.indexOf(w.key) >= 0
+        cb.addEventListener('change', function () {
+          var sel = bubblePlanWinsOf(m)
+          var at = sel.indexOf(w.key)
+          if (cb.checked && at < 0) sel.push(w.key)
+          if (!cb.checked && at >= 0) sel.splice(at, 1)
+          if (!sel.length) {  // 全不勾 = 退回默认（月），避免泡泡里什么都不显示
+            cb.checked = true
+            sel = [w.key]
+          }
+          m.planWins = sel
+          changed()
+        })
+        var tx = document.createElement('span')
+        tx.textContent = (CODEX_PLAN_WIN_NAMES[w.key] || w.label || w.key) +
+          (w.usedPct === null || w.usedPct === undefined ? '' : ' ' + (Number(w.usedPct) || 0).toFixed(0) + '%')
+        lab.appendChild(cb)
+        lab.appendChild(tx)
+        cwbox.appendChild(lab)
+      })(clist[ci])
+    }
+    cwrow.appendChild(cwbox)
+    box.appendChild(cwrow)
+  }
+  // 订阅额度模块的「显示样式」= 选时间窗口（多窗口**厂商**，如 OpenCode Go 的 5h / 周 / 月）
+  if (m.type === 'plan' && !apiCodexPlanWinList(m.modelId) && (apiPlanMultiWin(m.modelId) || apiPlanWinList(m.modelId))) {
     var wrow = qRow()
     wrow.appendChild(qLabel('显示样式'))
     var wsel = document.createElement('select')
@@ -9120,6 +9160,27 @@ function renderBubblePal() {
         })
         bubblePalEl.appendChild(chip4)
         return
+      }
+      // Codex（本地日志）的额度模块：日志里抓到几档窗口，编辑器里就勾几档
+      // （默认只显示「月」，周 / 5h 要手动勾 —— 用户定稿）
+      if (apiCodexPlanWinList(am.id)) {
+        var key5 = 'cx:' + am.id
+        var chip5 = document.createElement('div')
+        chip5.className = 'dshwv-palchip'
+        chip5.setAttribute('data-pal', key5)
+        chip5.textContent = '额度·' + am.name
+        chip5.title = 'Codex 订阅额度（读本机 ~/.codex 会话日志里的 rate_limits）；模板变量 {plan} 已用% / {plan_reset} 重置倒计时；' +
+          '编辑器里可勾选显示哪些窗口（抓到才有：5h / 周 / 月，默认月）'
+        chip5.draggable = true
+        chip5.addEventListener('click', function (e) {
+          e.stopPropagation()
+          bubbleModuleAdd({ type: 'plan', modelId: am.id, size: 8, bold: true, rgb: 'rouge', tpl: '已用 {plan} · {plan_reset}重置' })
+        })
+        chip5.addEventListener('dragstart', function (e) {
+          try { e.dataTransfer.setData('text/plain', key5) } catch (err) {}
+          bubbleDragKey = key5
+        })
+        bubblePalEl.appendChild(chip5)
       }
       var key = 'bal:' + am.id
       var chip2 = document.createElement('div')
@@ -9414,6 +9475,12 @@ function bubblePaletteModule(key) {
     var am2 = apiModelById(key.slice(3))
     if (!am2) return null
     return { type: 'plan', modelId: am2.id, size: 8, tpl: '{plan} · {plan_reset}', planWin: 'all' }
+  }
+  // Codex 额度模块（palette key = cx:<modelId>）：默认只显示「月」，周 / 5h 在编辑器里手动勾
+  if (typeof key === 'string' && key.indexOf('cx:') === 0) {
+    var am3 = apiModelById(key.slice(3))
+    if (!am3) return null
+    return { type: 'plan', modelId: am3.id, size: 8, bold: true, rgb: 'rouge', tpl: '已用 {plan} · {plan_reset}重置' }
   }
   if (key === 'random') return bubbleCloneModule(bubbleDefaultSecondModules()[0])
   if (typeof key === 'string' && key.indexOf('lib:') === 0) {
@@ -12916,7 +12983,20 @@ function apiCodexDetailText(modelId) {
   var s = '今日 ' + apiFmtTokens(c.todayTokens) + ' · 本月 ' + apiFmtTokens(c.monthTokens) +
     ' · 累计 ' + apiFmtTokens(c.totalTokens) + ' · 近7天 ' + apiFmtTokens(apiCodexDays7(c)) +
     '（' + (c.sessions || 0) + ' 个会话文件）'
+  // 额度窗口：日志抓到的档全列出来（5h / 周 / 月）—— 泡泡里显示哪些由模块勾选决定
   var w = apiCodexWindowsText(c)
+  if (!w) {
+    var list = apiPlanWinList(modelId)
+    if (list && list.length) {
+      var segs = []
+      for (var i = 0; i < list.length; i++) {
+        var ww = list[i]
+        segs.push((CODEX_PLAN_WIN_NAMES[ww.key] || ww.label || ww.key) + ' ' + apiPlanPctText(ww.usedPct) +
+          (apiPlanResetMs(ww.resetAt) === null ? '' : ' · ' + apiPlanCountdownShortText(apiPlanResetMs(ww.resetAt))))
+      }
+      w = segs.join(' | ')
+    }
+  }
   if (w) s += ' · ' + w
   return s
 }
@@ -12959,6 +13039,13 @@ function bubblePlanWinLabel(w) {
 function bubblePlanModuleLabel(m) {
   m = m || {}
   var nm = (apiModelById(m.modelId) || {}).name || m.modelId
+  // Codex：勾选窗口，标签跟着已勾的档走（没勾过就是「月」）
+  if (apiCodexPlanWinList(m.modelId)) {
+    var csel = bubblePlanWinsOf(m)
+    var names = []
+    for (var ci = 0; ci < csel.length; ci++) names.push(CODEX_PLAN_WIN_NAMES[csel[ci]] || csel[ci])
+    return '额度·' + nm + '（' + (names.join('/') || '月') + '）'
+  }
   var w = bubblePlanWinOf(m)
   return '额度·' + nm + (w === 'all' ? '' : '（' + bubblePlanWinLabel(w) + '）')
 }
@@ -12978,6 +13065,53 @@ function apiPlanMultiWin(modelId) {
 function apiPlanWinList(modelId) {
   var p = apiPlanOf(modelId)
   return (p && p.ok && p.windows && p.windows.length) ? p.windows : null
+}
+// —— Codex 的窗口来自本机日志，能抓到几档不由用户决定 → 用「多选勾选」而不是单选 ——
+// 用户定稿：默认只显示「月」，周 / 5h **要手动勾**；日志里没抓到的档不出现在勾选里。
+var CODEX_PLAN_WIN_KEYS = ['rolling', 'weekly', 'monthly']
+var CODEX_PLAN_WIN_NAMES = { rolling: '5h', weekly: '周', monthly: '月' }
+function apiCodexPlanWinList(modelId) {
+  var am = apiModelById(modelId)
+  if (!am || am.id !== 'codex') return null   // 只对 Codex（本地日志）生效，厂商模板走原有单选
+  return apiPlanWinList(modelId)
+}
+/** 勾选里实际要显示的窗口；没勾过 / 勾的档日志里没了 → 回落「月」（没有月则取日志里最粗的档）。 */
+function bubblePlanWinsOf(m) {
+  m = m || {}
+  var list = apiCodexPlanWinList(m.modelId) || []
+  if (!list.length) return []
+  var have = {}
+  for (var i = 0; i < list.length; i++) have[list[i].key] = 1
+  var sel = Array.isArray(m.planWins) ? m.planWins.filter(function (k) { return have[k] === 1 }) : []
+  if (sel.length) return sel
+  if (have['monthly']) return ['monthly']
+  return [list[list.length - 1].key]
+}
+function apiCodexPlanPctText(modelId, keys) {
+  var list = apiPlanWinList(modelId) || []
+  var parts = []
+  for (var i = 0; i < list.length; i++) {
+    var w = list[i]
+    if (keys.indexOf(w.key) < 0) continue
+    var v = w.usedPct
+    // 只勾一档时不带档位前缀（保持默认「已用 2%」的观感）；勾多档才标注是哪一档
+    var pre = keys.length > 1 ? ((CODEX_PLAN_WIN_NAMES[w.key] || w.label || w.key) + ' ') : ''
+    parts.push(pre + ((v === null || v === undefined) ? '--' : (Number(v) || 0).toFixed(1).replace(/\.0$/, '') + '%'))
+  }
+  return parts.length ? parts.join(' · ') : '--'
+}
+function apiCodexPlanResetText(modelId, keys) {
+  var list = apiPlanWinList(modelId) || []
+  var parts = []
+  for (var i = 0; i < list.length; i++) {
+    var w = list[i]
+    if (keys.indexOf(w.key) < 0) continue
+    var ms = apiPlanResetMs(w.resetAt)
+    if (ms === null) continue
+    var t = apiPlanCountdownShortText(ms)
+    if (t) parts.push((keys.length > 1 ? (CODEX_PLAN_WIN_NAMES[w.key] || w.label || w.key) + ' ' : '') + t)
+  }
+  return parts.length ? parts.join(' · ') : '--'
 }
 // 按窗口取「已用% / 剩余%」文本；非多窗口厂商返回 null（走原有单窗口逻辑）
 function apiPlanPctWinText(modelId, win, left) {
@@ -13119,6 +13253,15 @@ function bubbleContentTokenMap(m) {
     map['plan_used'] = map['plan']
     map['plan_left'] = apiPlanLeftText(m.modelId, pwin)
     map['plan_reset'] = apiPlanResetText(m.modelId, pwin)
+    // Codex（本地日志）走多选窗口：{plan} 只列已勾的档，{plan_reset} 同理
+    var cwins = apiCodexPlanWinList(m.modelId)
+    if (cwins && cwins.length) {
+      var csel = bubblePlanWinsOf(m)
+      map['plan'] = apiCodexPlanPctText(m.modelId, csel)
+      map['plan_used'] = map['plan']
+      map['plan_left'] = map['plan']
+      map['plan_reset'] = apiCodexPlanResetText(m.modelId, csel)
+    }
     return map
   }
   if (m.type === 'balance') {

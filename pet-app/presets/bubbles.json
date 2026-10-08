@@ -54,7 +54,6 @@
             "size": 8,
             "bold": true,
             "tpl": "已用 {plan} · {plan_reset}重置",
-            "planWin": "all",
             "rgb": "rouge",
             "color": "",
             "bgRgb": "",
